@@ -1,0 +1,154 @@
+/* ===== 確認／通知對話框（shared/AppShared.jsx 的 useConfirmDialogs，全站共用） =====
+   走 --ag-* token：日間主題下是亮卡片、深色主題下是墨藍卡片（原本寫死 #1e293b，日間也是黑框）。 */
+.ann-backdrop{
+  position: fixed; inset: 0; z-index: 9000;
+  display: flex; align-items: center; justify-content: center; padding: 1rem;
+  background: var(--ag-overlay);
+  backdrop-filter: blur(6px);
+}
+.ann-modal{
+  display: flex; flex-direction: column;
+  width: 100%; max-width: 520px; max-height: 80vh; overflow: hidden;
+  border-radius: var(--ag-r-xl);
+  background: var(--ag-surface);
+  border: 1px solid var(--ag-border-strong);
+  box-shadow: var(--ag-shadow-3);
+  color: var(--ag-text);
+}
+.ann-modal:focus{ outline: none; }
+.ann-modal.sm{ max-width: 480px; }
+.ann-modal.lg{ max-width: 560px; }
+
+.ann-modal-body{
+  flex: 1; display: flex; flex-direction: column; gap: .75rem;
+  padding: 1.25rem 1.5rem; overflow-y: auto;
+  font-size: .925rem; line-height: 1.7; color: var(--ag-text-2);
+}
+.ann-modal-footer{
+  display: flex; justify-content: flex-end; gap: .75rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--ag-border);
+  background: var(--ag-surface-2);
+}
+
+.ann-btn-dismiss,
+.ann-btn-confirm{
+  min-height: 40px; padding: 0 1.1rem;
+  border-radius: var(--ag-r-md);
+  font-weight: 600; cursor: pointer;
+  transition: background var(--ag-dur-1) var(--ag-ease), box-shadow var(--ag-dur-2) var(--ag-ease);
+}
+.ann-btn-dismiss{ border: 1px solid var(--ag-border-strong); background: transparent; color: var(--ag-text-2); }
+.ann-btn-dismiss:hover{ background: var(--ag-surface-3); color: var(--ag-text); }
+.ann-btn-confirm{ border: none; background: var(--ag-primary); color: var(--ag-on-primary); }
+.ann-btn-confirm:hover{ background: var(--ag-primary-hover); box-shadow: var(--ag-glow); }
+.ann-btn-confirm.danger{ background: var(--ag-bad); color: #fff; }
+.ann-btn-confirm.danger:hover{ box-shadow: none; filter: brightness(1.08); }
+.ann-btn-dismiss:focus-visible,
+.ann-btn-confirm:focus-visible{ outline: none; box-shadow: var(--ag-focus); }
+
+/* ===== 後台：公告卡與方案卡（與 .admin-panel 同一材質語言） ===== */
+.admin-ann-list{ display: flex; flex-direction: column; gap: .75rem; }
+.admin-ann-card{
+  padding: 1rem 1.25rem;
+  border-radius: var(--admin-radius);
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  box-shadow: var(--admin-shadow-card);
+  transition: border-color var(--ag-dur-2) var(--ag-ease);
+}
+.admin-ann-card:hover{ border-color: var(--admin-border-strong); }
+.admin-ann-card.inactive{ opacity: .62; }
+.admin-ann-card-header{ display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-bottom: .5rem; }
+.admin-ann-title{ font-weight: 600; color: var(--admin-text); }
+.admin-ann-type{ font-size: .72rem; font-weight: 600; padding: .15rem .55rem; border-radius: var(--ag-r-pill); }
+.admin-ann-type.permanent{ background: var(--admin-tone-bad-bg); color: var(--admin-tone-bad-text); }
+.admin-ann-type.temporary{ background: var(--admin-accent-soft-bg); color: var(--admin-accent-strong); }
+.admin-ann-preview{ margin: 0 0 .75rem; font-size: .85rem; color: var(--admin-text-muted); }
+.admin-ann-actions,
+.admin-plan-actions{ display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.admin-plan-actions{ margin-top: auto; padding-top: .5rem; }
+.admin-ann-actions button,
+.admin-plan-actions button{
+  min-height: 32px; padding: 0 .8rem;
+  border-radius: var(--ag-r-sm);
+  border: 1px solid var(--admin-border-strong);
+  background: transparent;
+  color: var(--admin-text-secondary);
+  font-size: .82rem; font-weight: 600; cursor: pointer;
+  transition: all var(--ag-dur-1) var(--ag-ease);
+}
+.admin-ann-actions button:hover,
+.admin-plan-actions button:hover{ border-color: var(--ag-border-accent); background: var(--admin-accent-soft-bg); color: var(--admin-accent-strong); }
+.admin-ann-actions button.danger,
+.admin-plan-actions button.danger{ border-color: var(--admin-tone-bad-border); color: var(--admin-tone-bad-text); }
+.admin-ann-actions button.danger:hover,
+.admin-plan-actions button.danger:hover{ background: var(--admin-tone-bad-bg); }
+.admin-ann-actions button:focus-visible,
+.admin-plan-actions button:focus-visible{ outline: none; box-shadow: var(--ag-focus); }
+.status-active{ color: var(--admin-tone-good-text); font-size: .8rem; font-weight: 600; }
+.status-inactive{ color: var(--admin-text-muted); font-size: .8rem; }
+
+/* ===== Admin Plans Cards ===== */
+.admin-plans-grid{ display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 1rem; }
+.admin-plan-card{
+  position: relative;
+  display: flex; flex-direction: column; gap: .5rem;
+  padding: 1.25rem;
+  border-radius: var(--admin-radius);
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  box-shadow: var(--admin-shadow-card);
+  transition: transform var(--ag-dur-2) var(--ag-ease), border-color var(--ag-dur-2) var(--ag-ease), box-shadow var(--ag-dur-2) var(--ag-ease);
+}
+.admin-plan-card:hover{ transform: translateY(-2px); border-color: var(--ag-border-accent); box-shadow: var(--admin-shadow-hover); }
+.admin-plan-card.is-inactive{ opacity: .62; }
+.admin-plan-badge{
+  position: absolute; top: .75rem; right: .75rem;
+  padding: .2rem .55rem; border-radius: var(--ag-r-pill);
+  font-size: .7rem; font-weight: 700;
+  background: var(--admin-highlight-soft);
+  color: var(--admin-tone-warn-text);
+  border: 1px solid color-mix(in srgb, var(--admin-highlight) 40%, transparent);
+}
+.admin-plan-name{ margin: 0; font-family: var(--ag-font-display); font-size: 1.1rem; font-weight: 700; color: var(--admin-text); }
+.admin-plan-price{ margin: 0; font-family: var(--ag-font-display); font-size: 1.6rem; font-weight: 700; letter-spacing: -0.01em; color: var(--admin-accent-strong); font-variant-numeric: tabular-nums; }
+.admin-plan-coin{ margin: 0; font-weight: 600; color: var(--admin-text); }
+.admin-plan-rate{ margin: 0; font-size: .8rem; color: var(--admin-text-muted); }
+.admin-plan-desc{ margin: 0; font-size: .8rem; color: var(--admin-text-muted); }
+.admin-plan-econ{
+  display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem;
+  margin: .35rem 0 0; padding: .55rem .7rem;
+  border-radius: var(--ag-r-sm);
+  background: var(--admin-surface-sunken);
+  border: 1px dashed var(--admin-border-strong);
+  font-size: .8rem;
+}
+.admin-plan-econ dt{ margin: 0; color: var(--admin-text-muted); }
+.admin-plan-econ dd{ margin: 0; color: var(--admin-text); font-variant-numeric: tabular-nums; }
+.admin-plan-econ dd.tone-good{ color: var(--admin-tone-good-text); }
+.admin-plan-econ dd.tone-warn{ color: var(--admin-tone-warn-text); }
+.admin-plan-econ dd.tone-bad{ color: var(--admin-tone-bad-text); }
+
+.admin-plan-econ-preview{
+  padding: .55rem .75rem;
+  border-radius: var(--ag-r-sm);
+  background: var(--admin-surface-sunken);
+  border: 1px solid var(--admin-border);
+  font-size: .85rem;
+  color: var(--admin-text-secondary);
+}
+.admin-plan-econ-preview.tone-good{ color: var(--admin-tone-good-text); border-color: var(--admin-tone-good-border); }
+.admin-plan-econ-preview.tone-warn{ color: var(--admin-tone-warn-text); border-color: var(--admin-tone-warn-border); }
+.admin-plan-econ-preview.tone-bad{ color: var(--admin-tone-bad-text); border-color: var(--admin-tone-bad-border); }
+
+.admin-page-note{
+  margin: .25rem 0 1rem;
+  padding: .6rem .85rem;
+  border-radius: var(--ag-r-sm);
+  background: var(--admin-accent-soft-bg);
+  border-left: 3px solid var(--admin-accent);
+  font-size: .85rem;
+  color: var(--admin-text-secondary);
+}
+

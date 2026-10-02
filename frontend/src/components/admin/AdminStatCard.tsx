@@ -1,0 +1,81 @@
+// 後台統計卡與其內嵌的 sparkline。
+//
+// 原本定義在 AdminPages.jsx 內部，概覽與評論治理都要用卻無法重用；抽出後
+// 兩處共用同一份，樣式不會再各自漂移。
+
+import type { ComponentType, ReactNode } from "react";
+
+type AdminStatCardProps = {
+  label: ReactNode;
+  value: ReactNode;
+  hint?: ReactNode;
+  tone?: string;
+  icon?: ComponentType;
+  hero?: boolean;
+  spark?: ReactNode;
+};
+
+export function AdminStatCard({
+  label,
+  value,
+  hint,
+  tone = "cyan",
+  icon: Icon,
+  hero = false,
+  spark,
+}: AdminStatCardProps) {
+  return (
+    <div className={`admin-stat-card tone-${tone}${hero ? " hero" : ""}`}>
+      <div className="admin-stat-head">
+        <div className="admin-stat-label">{label}</div>
+        {Icon && (
+          <span className="admin-stat-icon-chip">
+            <Icon />
+          </span>
+        )}
+      </div>
+      <div className="admin-stat-value">{value}</div>
+      {hint && <div className="admin-stat-hint">{hint}</div>}
+      {spark && <div className="admin-stat-spark">{spark}</div>}
+    </div>
+  );
+}
+
+type AdminSparklineProps = {
+  series: Array<Record<string, number | string | null | undefined>> | null | undefined;
+  dataKey: string;
+  /** 品牌圖表序列（1＝虹膜青、2＝守望琥珀、3 之後為維度色）；顏色由 CSS token 決定 */
+  seriesIndex?: 1 | 2 | 3 | 4 | 5;
+  height?: number;
+};
+
+export function AdminSparkline({ series, dataKey, seriesIndex = 1, height = 40 }: AdminSparklineProps) {
+  if (!series || series.length < 2) return null;
+  const w = 240;
+  const values = series.map((row) => Number(row[dataKey]) || 0);
+  const maxV = Math.max(...values, 1);
+  const minV = Math.min(...values, 0);
+  const range = maxV - minV || 1;
+  const step = w / (series.length - 1);
+  const yFor = (v: number) => 2 + (height - 4) * (1 - (v - minV) / range);
+  const linePoints = values.map((v, i) => `${i * step},${yFor(v)}`).join(" ");
+  const areaPoints = `0,${height} ${linePoints} ${w},${height}`;
+  const gradId = `admin-spark-${dataKey}`;
+  return (
+    <svg
+      className={`admin-stat-spark-svg admin-chart-series series-${seriesIndex}`}
+      viewBox={`0 0 ${w} ${height}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" className="admin-chart-stop" stopOpacity="0.25" />
+          <stop offset="100%" className="admin-chart-stop" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <polygon points={areaPoints} fill={`url(#${gradId})`} stroke="none" />
+      <polyline className="admin-chart-line" points={linePoints} vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}

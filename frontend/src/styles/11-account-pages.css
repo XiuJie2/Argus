@@ -1,0 +1,221 @@
+@layer components {
+  /* ========================================
+     會員區（features/account）：共用頁框、Settings
+     （Dashboard／History／購點為改版前版本，樣式在 legacy-member/）
+     只用 --ag-* token；深色（預設）與日間共用同一組規則。
+     ======================================== */
+
+  /* ── 共用頁框 ── */
+  .acct-page,
+  .dash{
+    display: grid;
+    gap: 1.25rem;
+    width: 100%;
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+
+  .acct-page-head{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-bottom: 0.25rem;
+  }
+  .acct-page-head > div{ display: grid; gap: 0.4rem; }
+  .acct-page-title{
+    margin: 0;
+    color: var(--ag-text);
+    font-size: clamp(1.5rem, 2.4vw, 2rem);
+    font-weight: 700;
+    line-height: 1.2;
+  }
+  .acct-page-sub{ margin: 0; color: var(--ag-text-2); font-size: 0.92rem; line-height: 1.6; }
+
+  /* ========================================
+     Settings 頁
+     ======================================== */
+
+  .set-layout{
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    align-items: start;
+    gap: 1.25rem;
+  }
+  .set-summary{
+    position: sticky;
+    top: calc(var(--ag-nav-h) + 1.25rem);
+    display: grid;
+    gap: 1rem;
+  }
+  .set-card,
+  .set-section{
+    padding: 1.25rem;
+    border: 1px solid var(--ag-border);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-surface);
+    box-shadow: var(--ag-shadow-1);
+  }
+  .set-card{ display: grid; gap: 0.5rem; }
+  .set-card-label{
+    margin: 0;
+    color: var(--ag-text-3);
+    font-family: var(--ag-font-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .set-profile-card{ grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 1rem; }
+  .set-avatar-actions{ grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+  .set-avatar-actions .set-hint{ flex-basis: 100%; }
+  .set-link-btn{
+    padding: 0.25rem 0.25rem;
+    border: 0;
+    background: none;
+    color: var(--ag-text-2);
+    font-size: 0.85rem;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+  .set-link-btn:hover{ color: var(--ag-bad); }
+  .set-link-btn:disabled{ opacity: 0.5; cursor: not-allowed; }
+  .set-profile-id{ display: grid; min-width: 0; gap: 0.2rem; justify-items: start; }
+  .set-profile-id strong{ max-width: 100%; overflow: hidden; color: var(--ag-text); font-size: 1rem; text-overflow: ellipsis; white-space: nowrap; }
+  .set-profile-id small{ max-width: 100%; overflow: hidden; color: var(--ag-text-3); font-family: var(--ag-font-mono); font-size: 0.74rem; text-overflow: ellipsis; white-space: nowrap; }
+  .set-provider-chip{
+    margin-top: 0.25rem;
+    padding: 0.1rem 0.55rem;
+    border-radius: var(--ag-r-pill);
+    background: var(--ag-surface-2);
+    color: var(--ag-text-2);
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+  .set-wallet-balance{ margin: 0; color: var(--ag-text); font-size: 2rem; font-weight: 700; line-height: 1.1; }
+  .set-wallet-balance span{ color: var(--ag-accent); font-size: 0.9rem; font-weight: 600; }
+  .set-value{ margin: 0; color: var(--ag-text); font-size: 0.95rem; font-weight: 600; }
+  .set-hint{ margin: 0; color: var(--ag-text-3); font-size: 0.78rem; line-height: 1.55; }
+  .set-block-btn{ width: 100%; margin-top: 0.4rem; }
+
+  .set-main{ display: grid; gap: 1rem; min-width: 0; }
+  .set-section{ display: grid; gap: 1.1rem; padding: 1.4rem 1.5rem; }
+  .set-section-head{ display: grid; gap: 0.25rem; }
+  .set-section-head h2{ margin: 0; color: var(--ag-text); font-size: 1.05rem; font-weight: 700; }
+  .set-section-head p{ margin: 0; color: var(--ag-text-2); font-size: 0.84rem; line-height: 1.6; }
+  .set-subtitle{ margin: 0.25rem 0 0; color: var(--ag-text); font-size: 0.92rem; font-weight: 700; }
+
+  .set-form{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+  .set-field{ display: grid; gap: 0.4rem; min-width: 0; }
+  .set-field-full,
+  .set-form-actions{ grid-column: 1 / -1; }
+  .set-label{ color: var(--ag-text); font-size: 0.82rem; font-weight: 600; }
+  .set-readonly{
+    margin: 0;
+    padding: 0.7rem 1rem;
+    border: 1px dashed var(--ag-border-strong);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-bg-raised);
+    color: var(--ag-text-2);
+    font-family: var(--ag-font-mono);
+    font-size: 0.86rem;
+    overflow-wrap: anywhere;
+  }
+  .set-form-actions{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+  .set-msg{ margin: 0; font-size: 0.84rem; font-weight: 600; }
+  .set-msg.tone-good{ color: var(--ag-good); }
+  .set-msg.tone-bad{ color: var(--ag-bad); }
+
+  .set-theme-options{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+  .set-theme-option{
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--ag-border-strong);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-bg-raised);
+    cursor: pointer;
+    transition: border-color var(--ag-dur-2) var(--ag-ease), box-shadow var(--ag-dur-2), background var(--ag-dur-2);
+  }
+  .set-theme-option:hover{ border-color: var(--ag-border-accent); }
+  .set-theme-option:has(input:checked){ border-color: var(--ag-primary); background: var(--ag-primary-soft); box-shadow: var(--ag-glow); }
+  .set-theme-option:focus-within{ outline: 2px solid var(--ag-primary); outline-offset: 2px; }
+  .set-theme-option input{ accent-color: var(--ag-primary); width: 1.05rem; height: 1.05rem; }
+  .set-theme-swatch{
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--ag-r-md);
+    box-shadow: inset 0 0 0 1px var(--ag-border-strong);
+  }
+  .set-theme-swatch svg{ width: 20px; height: 20px; }
+  /* 預覽色塊刻意用品牌原色，不跟目前主題變 */
+  .set-theme-swatch.is-dark{ background: var(--ag-ink-900); color: var(--ag-iris-400); }
+  .set-theme-swatch.is-light{ background: color-mix(in srgb, var(--ag-iris-200) 22%, white); color: var(--ag-signal-600); }
+  .set-theme-copy{ display: grid; gap: 0.1rem; }
+  .set-theme-copy strong{ color: var(--ag-text); font-size: 0.9rem; }
+  .set-theme-copy small{ color: var(--ag-text-3); font-size: 0.74rem; }
+
+  .set-danger{ border-color: color-mix(in srgb, var(--ag-bad) 30%, transparent); }
+  .set-danger .set-section-head h2{ color: var(--ag-bad); }
+  .set-danger-btn{
+    justify-self: start;
+    min-height: 42px;
+    padding: 0 1.1rem;
+    border: 1px solid color-mix(in srgb, var(--ag-bad) 55%, transparent);
+    border-radius: var(--ag-r-md);
+    background: transparent;
+    color: var(--ag-bad);
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--ag-dur-2);
+  }
+  .set-danger-btn:hover{ background: var(--ag-bad-soft); }
+
+  /* ── 會員區響應式 ── */
+  @media (max-width: 1100px) {
+    .set-layout { grid-template-columns: minmax(0, 1fr); }
+    .set-summary { position: static; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  }
+
+  @media (max-width: 760px) {
+    .set-form,
+    .set-theme-options{ grid-template-columns: minmax(0, 1fr); }
+  }
+
+  @media (max-width: 480px) {
+    .set-section{ padding: 1.15rem 1rem; }
+  }
+
+  /* ========================================
+     時間軸（ProjectPage 里程碑沿用；會員區已不使用）
+     ======================================== */
+
+  .timeline{
+    @apply mt-3 space-y-3 border-l-2 border-slate-200 pl-5;
+  }
+
+  
+
+  
+  
+  
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+
+}

@@ -1,0 +1,52 @@
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
+
+from apps.admin_api import cms_views, views
+
+cms_router = DefaultRouter()
+cms_router.register("features", cms_views.ProjectFeatureViewSet, basename="admin-feature")
+cms_router.register("team", cms_views.TeamMemberViewSet, basename="admin-team-member")
+cms_router.register("releases", cms_views.AppReleaseViewSet, basename="admin-release")
+cms_router.register("plans", cms_views.PricingPlanViewSet, basename="admin-plan")
+cms_router.register("milestones", cms_views.ProjectMilestoneViewSet, basename="admin-milestone")
+cms_router.register(
+    "partner-inquiries", cms_views.PartnerInquiryViewSet, basename="admin-partner-inquiry",
+)
+
+urlpatterns = [
+    path("cms/", include(cms_router.urls)),
+    path("me/", views.me, name="admin-me"),
+    path("settings/", views.system_settings, name="admin-settings"),
+    path("health/", views.system_health, name="admin-health"),
+    path("overview/", views.overview, name="admin-overview"),
+    path("users/", views.users_list, name="admin-users"),
+    path("users/<int:user_id>/", views.user_detail, name="admin-user-detail"),
+    path("users/<int:user_id>/adjust-coin/", views.adjust_coin, name="admin-adjust-coin"),
+    path(
+        "users/<int:user_id>/login-events/",
+        views.user_login_events,
+        name="admin-user-login-events",
+    ),
+    path(
+        "users/<int:user_id>/subscription/",
+        views.user_subscription,
+        name="admin-user-subscription",
+    ),
+    path("subscriptions/plans/", views.subscription_plans, name="admin-subscription-plans"),
+    path("transactions/", views.transactions_list, name="admin-transactions"),
+    path("reviews/", views.reviews_list, name="admin-reviews"),
+    path("reviews/<int:review_id>/reply/", views.reply_review, name="admin-reply-review"),
+    path("reviews/<int:review_id>/moderate/", views.moderate_review, name="admin-moderate-review"),
+    path("scans/", views.scans_list, name="admin-scans"),
+    path("scans/<int:scan_id>/", views.scan_detail, name="admin-scan-detail"),
+    path("scans/<int:scan_id>/cancel/", views.scan_cancel, name="admin-scan-cancel"),
+    path("scans/<int:scan_id>/requeue/", views.scan_requeue, name="admin-scan-requeue"),
+    path("domains/", views.domains_list, name="admin-domains"),
+    path("domains/<int:domain_id>/override/", views.domain_override, name="admin-domain-override"),
+    path("orders/", views.orders_list, name="admin-orders"),
+    path("dashboard/", views.dashboard, name="admin-dashboard"),
+    path("audit-log/", views.audit_log, name="admin-audit-log"),
+    path("announcements/active/", views.active_announcements, name="admin-active-announcements"),
+    path("announcements/", views.announcements_admin, name="admin-announcements"),
+    path("announcements/<int:pk>/", views.announcement_detail, name="admin-announcement-detail"),
+]

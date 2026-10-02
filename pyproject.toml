@@ -1,0 +1,56 @@
+[project]
+name = "argus"
+version = "0.1.0"
+description = "授權式 AI 網站健檢平台"
+readme = "Project_說明.md"
+requires-python = ">=3.12"
+dependencies = [
+    "celery>=5.4,<6",
+    "cryptography>=46,<49",
+    "dj-database-url>=2.2,<3",
+    "django>=5.0,<6",
+    "django-cors-headers>=4.4,<5",
+    "django-storages[s3]>=1.14,<2",
+    "djangorestframework>=3.15,<4",
+    "djangorestframework-simplejwt>=5.3,<6",
+    "dnspython>=2.8.0",
+    "drf-spectacular>=0.30.0",
+    "google-auth>=2.53.0",
+    "gunicorn>=23,<24",
+    "httpx>=0.28.1",
+    "kubernetes>=35.0,<36",
+    "matplotlib>=3.11.1",
+    "pillow>=12.2.0",
+    "playwright>=1.48,<2",
+    "psycopg[binary]>=3.2,<4",
+    "python-docx>=1.1,<2",
+    "python-dotenv>=1.0,<2",
+    "redis>=5.0,<6",
+    "requests>=2.34.2",
+]
+
+[dependency-groups]
+dev = [
+    "jsonschema>=4.26.0",
+    "pyyaml>=6.0,<7",
+    "ruff>=0.8,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# report_render/ 是使用者提供的報告產生 module，原樣 vendor 進來。
+# 不套專案 lint 規則：為了過 lint 去重排第三方程式碼，日後更新 module 會變成
+# 逐行手動合併。唯一的在地修改是 theme.py 的字型解析（原版寫死路徑且註釋與
+# 實作不符），該處有註解說明。
+extend-exclude = ["**/migrations/*.py", "backend/apps/scans/report_render/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/apps/accounts/emails.py" = ["E501"]
+"backend/apps/billing/emails.py" = ["E501"]

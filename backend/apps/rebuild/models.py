@@ -1,0 +1,70 @@
+from django.db import models
+
+
+class SiteRebuild(models.Model):
+    """一次「複刻 + 優化」的產出紀錄。
+
+    複刻（snapshot）與優化（optimized）是兩個**成本完全不同**的階段：
+    複刻只是把爬蟲已經抓到的 DOM 重新組裝，不花 token；優化才會呼叫外部
+    agent。兩者分開存路徑，是為了讓優化失敗時複刻仍可交付——使用者至少
+    拿得到原樣快照，不會因為 agent 出錯就整個功能無產出。
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "等待中"
+        SNAPSHOTTING = "snapshotting", "複刻中"
+        OPTIMIZING = "optimizing", "優化中"
+        ASKING = "asking", "回答中"
+        SUCCEEDED = "succeeded", "完成"
+        FAILED = "failed", "失敗"
+
+    scan_job = models.ForeignKey(
+        "scans.ScanJob",
+        on_delete=models.CASCADE,
+        related_name="rebuilds",
+        db_index=True,
+    )
+    page = models.ForeignKey(
+        "scans.Page",
+        on_delete=models.CASCADE,
+        related_name="rebuilds",
+    )
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    # MEDIA_ROOT 相對路徑，不存絕對路徑：media 是 RWX PVC，web 與 worker 的
+    # 掛載點相同但不保證未來不變，存相對路徑才不會綁死部署佈局。
+    snapshot_path = models.CharField(max_length=512, blank=True)
+    optimized_path = models.CharField(max_length=512, blank=True)
+    # 只存 session id 供追查，不存完整 prompt——那含被掃描站的原始碼。
+    opencode_session_id = models.CharField(max_length=128, blank=True)
+    # agent 的思考／工具使用過程，供前端即時呈現。任務進行中會被反覆覆寫，
+    # 所以有筆數與長度上限——沒有上限的話，一個話很多的模型可以把單一資料列
+    # 撐到幾 MB，而這張表每次 polling 都會被讀。
+    trace = models.JSONField(default=list, blank=True)
+    # agent 的「回答」與「思考過程」分開存。混在一起的話，結論會被埋在幾百則
+    # 推理片段之間，使用者找不到重點——這是實際回報過的體感問題。
+    reply = models.TextField(blank=True)
+    # 使用者的追問往返，[{"role": "user"|"agent", "text": ...}]。
+    # 有上限，理由同 trace：列表端點會被 polling。
+    conversation = models.JSONField(default=list, blank=True)
+    # 每一筆修改有沒有套用成功。模型偶爾會憑印象重打 find 字串而對不上，
+    # 使用者有權知道「它說要改 12 項，實際只套上 9 項」。
+    edit_report = models.JSONField(default=list, blank=True)
+    model_id = models.CharField(max_length=128, blank=True)
+    # agent 回報的實際花費（USD），計費的依據
+    cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=0)
+    # 結算後真正扣掉的點數。預扣是上限不是價格，兩者要分開存，否則使用者
+    # 看到的「花了 30 點」會與實際不符。
+    coins_charged = models.PositiveIntegerField(default=0)
+    # 只放可以直接顯示給使用者的訊息；provider 原始錯誤不落地（可能含 key）。
+    error = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["scan_job", "status"])]
+
+    def __str__(self) -> str:
+        return f"SiteRebuild<{self.pk}> {self.page_id} {self.status}"

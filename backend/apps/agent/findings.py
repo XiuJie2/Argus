@@ -1,0 +1,148 @@
+"""把 Hermes-Agent 的 report_ux_issue 結果落地成 Finding。
+
+設計：
+- loop 層只負責收集 issues（dict 列表），不直接寫 DB；落地分離方便測試。
+- 落地時依 issue['url'] 找對應 Page（若找不到則 page=None，視為站台層級 finding）。
+- ai_handoff_prompt 走專案統一模板，明確要求對方 LLM「不要輸出完整修復程式碼」。
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterable
+
+from apps.scans.models import Finding, Page, ScanJob
+
+UX_HANDOFF_TEMPLATE = """我網站有以下 UX 問題，請協助我分析並提供修復方向：
+- 問題類型: ux
+- 嚴重度: {severity}
+- 問題描述: {description}
+- 對應位置: {url}
+- 元素 selector: {selector}
+- 修補建議方向: {remediation}
+
+請依此資訊提供具體修改方向、檢查步驟與注意事項；不要輸出完整修復程式碼。"""
+
+
+VALID_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+
+
+def persist_agent_issues(
+    scan_job: ScanJob, issues: Iterable[dict], default_priority: float = 50.0
+) -> list[Finding]:
+    """把 agent 收集的 issue 落地成 Finding（category=ux）。
+
+    回傳新建的 Finding 物件列表。同 scan_job 內若已有相同 title 的 ux finding，
+    則略過（避免 agent 多輪重複回報同一問題）。
+    """
+    created: list[Finding] = []
+    existing_titles = set(
+        scan_job.findings.filter(category=Finding.Category.UX).values_list("title", flat=True)
+    )
+
+    page_cache: dict[str, Page | None] = {}
+
+    for issue in issues:
+        title = (issue.get("title") or "").strip()[:255]
+        if not title or title in existing_titles:
+            continue
+
+        severity = issue.get("severity") or "low"
+        if severity not in VALID_SEVERITIES:
+            severity = "low"
+
+        description = (issue.get("description") or "").strip()
+        if not description:
+            continue
+
+        remediation = (issue.get("remediation") or "請檢視該流程的可用性並對齊使用者預期。").strip()
+        url = (issue.get("url") or "").strip()
+        selector = (issue.get("selector") or "").strip()[:512]
+
+        page = _resolve_page(scan_job, url, page_cache)
+        evidence = f"URL: {url}\nselector: {selector}"
+        rule_id = f"AGENT_UX_{hashlib.sha1(title.encode('utf-8')).hexdigest()[:10].upper()}"
+
+        handoff = UX_HANDOFF_TEMPLATE.format(
+            severity=severity,
+            description=description,
+            url=url or "(站台層級)",
+            selector=selector or "(無)",
+            remediation=remediation,
+        )
+
+        finding = Finding.objects.create(
+            scan_job=scan_job,
+            page=page,
+            category=Finding.Category.UX,
+            severity=severity,
+            title=title,
+            description=description,
+            remediation=remediation,
+            evidence=evidence,
+            rule_id=rule_id,
+            evidence_type="agent_observation",
+            evidence_json={
+                "type": "agent_observation",
+                "source": "hermes_agent",
+                "excerpt": evidence,
+                "url": url,
+                "selector": selector,
+            },
+            evidence_source="hermes_agent",
+            ai_explanation="",
+            ai_remediation="",
+            llm_model="",
+            llm_generated_at=None,
+            selector=selector,
+            ai_handoff_prompt=handoff,
+            priority_score=default_priority,
+            impact_area="ux",
+            confidence=0.7,  # Agent 自我回報，預設信心略低於規則式掃描
+        )
+        created.append(finding)
+        existing_titles.add(title)
+
+    return created
+
+
+def persist_agent_security_findings(
+    scan_job: ScanJob, findings: Iterable[dict]
+) -> list[Finding]:
+    """把 Hermes-Agent 主動驗證（probe_sql_injection）確認的 security finding 落地。
+
+    - findings 為 `scanners.make_finding` 產生的 dict（欄位對應 Finding model）。
+    - 套 `owasp_mapper.tag` 補 OWASP/CWE，使與 pipeline 的 kali finding 標籤一致。
+    - 依 description 去重（description 內含具體 URL），避免 agent 多輪對同一 URL 重複記錄。
+    - 任一筆失敗只跳過該筆，不影響其他（silent-fail），不讓 agent 例外拖垮掃描。
+    """
+    from apps.scans.security import owasp_mapper
+
+    created: list[Finding] = []
+    seen = set(
+        scan_job.findings.filter(rule_id="kali-sqlmap-sqli").values_list(
+            "description", flat=True
+        )
+    )
+    for raw in findings:
+        try:
+            tagged = owasp_mapper.tag(dict(raw))
+            desc = tagged.get("description", "")
+            if not desc or desc in seen:
+                continue
+            obj = Finding.objects.create(scan_job=scan_job, page=None, **tagged)
+            created.append(obj)
+            seen.add(desc)
+        except Exception:  # noqa: BLE001 — 單筆落地失敗不影響其他 finding 與主掃描
+            continue
+    return created
+
+
+def _resolve_page(scan_job: ScanJob, url: str, cache: dict[str, Page | None]) -> Page | None:
+    if not url:
+        return None
+    if url in cache:
+        return cache[url]
+    page = scan_job.pages.filter(final_url=url).first() or scan_job.pages.filter(url=url).first()
+    cache[url] = page
+    return page

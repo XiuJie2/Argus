@@ -1,0 +1,390 @@
+@layer components {
+  /* ============================================================
+     /billing 3 步驟 Wizard（features/account/BillingPage）
+     .wizard-field／.wizard-field-hint 也被後台內容管理表單沿用。只用 --ag-* token。
+     ============================================================ */
+
+  /* ── 步驟指示 ── */
+  .wizard-stepper {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin: 1.25rem 1.75rem 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .wizard-step {
+    position: relative;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.7rem;
+    min-width: 0;
+    min-height: 4rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--ag-border);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-bg-raised);
+    transition: border-color var(--ag-dur-2) var(--ag-ease), background var(--ag-dur-2);
+  }
+
+  .wizard-step-circle {
+    display: inline-grid;
+    place-items: center;
+    width: 2.2rem;
+    height: 2.2rem;
+    border: 1px solid var(--ag-border-strong);
+    border-radius: 50%;
+    background: var(--ag-surface);
+    color: var(--ag-text-3);
+    font-family: var(--ag-font-display);
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: all var(--ag-dur-2) var(--ag-ease);
+  }
+  .wizard-step-circle svg { width: 16px; height: 16px; stroke-width: 2.2; }
+
+  .wizard-step-copy { display: flex; min-width: 0; flex-direction: column; gap: 0.1rem; }
+  .wizard-step-kicker {
+    color: var(--ag-text-3);
+    font-family: var(--ag-font-mono);
+    font-size: 0.64rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+  }
+  .wizard-step-label {
+    overflow: hidden;
+    color: var(--ag-text-2);
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wizard-step.active {
+    border-color: var(--ag-primary);
+    background: var(--ag-primary-soft);
+    box-shadow: var(--ag-glow);
+  }
+  .wizard-step.active .wizard-step-circle {
+    border-color: transparent;
+    background: var(--ag-primary);
+    color: var(--ag-on-primary);
+  }
+  .wizard-step.active .wizard-step-kicker { color: var(--ag-primary); }
+  .wizard-step.active .wizard-step-label { color: var(--ag-text); }
+
+  .wizard-step.done .wizard-step-circle {
+    border-color: color-mix(in srgb, var(--ag-good) 45%, transparent);
+    background: var(--ag-good-soft);
+    color: var(--ag-good);
+  }
+  .wizard-step.done .wizard-step-label { color: var(--ag-text); }
+
+  /* ── 步驟 2：表單 + 訂單摘要 ── */
+  .wizard-checkout-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(17.5rem, 22rem);
+    align-items: start;
+    gap: 1.25rem;
+    padding: 1.25rem 1.75rem 1.75rem;
+  }
+
+  .wizard-form-panel { display: flex; min-width: 0; flex-direction: column; gap: 1rem; }
+  .wizard-form-intro { display: grid; gap: 0.3rem; }
+  .wizard-form-kicker {
+    margin: 0;
+    color: var(--ag-primary);
+    font-family: var(--ag-font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+  }
+  .wizard-form-intro h3 { margin: 0; color: var(--ag-text); font-size: 1.15rem; font-weight: 700; line-height: 1.35; }
+  .wizard-form-intro > p:last-child { margin: 0; color: var(--ag-text-2); font-size: 0.82rem; line-height: 1.6; }
+
+  .wizard-field { display: flex; min-width: 0; flex-direction: column; gap: 0.4rem; }
+  .wizard-field > label { color: var(--ag-text); font-size: 0.82rem; font-weight: 600; }
+  .wizard-field > label > span {
+    margin-left: 0.3rem;
+    color: var(--ag-text-3);
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
+  .wizard-field-hint { margin: 0; color: var(--ag-text-3); font-size: 0.74rem; line-height: 1.5; }
+  .wizard-field-error { margin: 0; color: var(--ag-bad); font-size: 0.76rem; font-weight: 600; line-height: 1.5; }
+
+  .wizard-acknowledgement {
+    padding: 0.95rem 1rem;
+    border: 1px solid var(--ag-border-accent);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-primary-soft);
+  }
+  .wizard-acknowledgement.is-error {
+    border-color: color-mix(in srgb, var(--ag-bad) 50%, transparent);
+    background: var(--ag-bad-soft);
+  }
+  .wizard-acknowledgement .wizard-field-error { margin: 0.5rem 0 0 1.95rem; }
+
+  .wizard-checkbox { display: flex; align-items: flex-start; gap: 0.75rem; cursor: pointer; }
+  .wizard-checkbox input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: 1.15rem;
+    height: 1.15rem;
+    margin-top: 0.15rem;
+    accent-color: var(--ag-primary);
+  }
+  .wizard-checkbox > span { display: flex; flex-direction: column; gap: 0.2rem; }
+  .wizard-checkbox strong { color: var(--ag-text); font-size: 0.85rem; line-height: 1.45; }
+  .wizard-checkbox small { color: var(--ag-text-2); font-size: 0.76rem; line-height: 1.55; }
+
+  .wizard-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-top: 0.25rem;
+  }
+  .wizard-nav .primary-button,
+  .wizard-nav .secondary-button { min-height: 46px; padding-inline: 1.1rem; }
+
+  /* 訂單摘要：像一張收據，數字全用 tabular */
+  .wizard-order-summary {
+    position: sticky;
+    top: calc(var(--ag-nav-h) + 1rem);
+    padding: 1.3rem;
+    border: 1px solid var(--ag-border-strong);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-bg-raised);
+    box-shadow: var(--ag-shadow-2);
+  }
+  .wizard-order-summary-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-bottom: 0.9rem;
+    border-bottom: 1px solid var(--ag-border);
+    color: var(--ag-text-2);
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+  .wizard-order-stage {
+    padding: 0.15rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--ag-warn) 50%, transparent);
+    border-radius: var(--ag-r-pill);
+    background: var(--ag-warn-soft);
+    color: var(--ag-warn);
+    font-family: var(--ag-font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.12em;
+  }
+  .wizard-order-plan {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 1rem 0;
+  }
+  .wizard-order-plan > span { color: var(--ag-text); font-size: 1.02rem; font-weight: 700; }
+  .wizard-order-plan > strong {
+    color: var(--ag-primary);
+    font-family: var(--ag-font-display);
+    font-size: 1.5rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .wizard-order-plan small { color: var(--ag-text-3); font-size: 0.76rem; }
+
+  .wizard-order-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    margin: 0;
+    padding: 0.85rem 0;
+    border-block: 1px dashed var(--ag-border-strong);
+  }
+  .wizard-order-details > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.84rem;
+  }
+  .wizard-order-details dt { color: var(--ag-text-2); }
+  .wizard-order-details dd { margin: 0; color: var(--ag-text); font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+
+  .wizard-order-total {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-top: 1rem;
+  }
+  .wizard-order-total span { color: var(--ag-text-2); font-size: 0.88rem; font-weight: 600; }
+  .wizard-order-total strong {
+    color: var(--ag-text);
+    font-family: var(--ag-font-display);
+    font-size: 1.7rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .wizard-order-assurances {
+    display: grid;
+    gap: 0.55rem;
+    margin: 1rem 0 0;
+    padding: 0.9rem 0 0;
+    border-top: 1px solid var(--ag-border);
+    list-style: none;
+  }
+  .wizard-order-assurances li {
+    position: relative;
+    padding-left: 1.3rem;
+    color: var(--ag-text-2);
+    font-size: 0.8rem;
+    line-height: 1.55;
+  }
+  /* CSS 畫的勾號（不用文字符號，避免字型差異） */
+  .wizard-order-assurances li::before {
+    content: "";
+    position: absolute;
+    top: 0.32em;
+    left: 0.15rem;
+    width: 0.4rem;
+    height: 0.7rem;
+    border: solid var(--ag-good);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+
+  /* ── 步驟 3：確認 ── */
+  .wizard-confirm { display: grid; gap: 0.9rem; }
+  .wizard-confirm-title { margin: 0; color: var(--ag-text); font-size: 1.15rem; font-weight: 700; }
+  .wizard-confirm-card {
+    padding: 1.1rem 1.2rem;
+    border: 1px solid var(--ag-border);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-bg-raised);
+  }
+  .wizard-confirm-card h4 {
+    margin: 0 0 0.6rem;
+    color: var(--ag-text-3);
+    font-family: var(--ag-font-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+  }
+  .wizard-confirm-plan { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .wizard-confirm-plan-name { color: var(--ag-text); font-size: 1rem; font-weight: 700; }
+  .wizard-confirm-plan-coin { color: var(--ag-primary); font-size: 0.86rem; font-weight: 600; }
+  .wizard-confirm-plan-price {
+    color: var(--ag-text);
+    font-family: var(--ag-font-display);
+    font-size: 1.25rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .wizard-confirm-dl {
+    display: grid;
+    grid-template-columns: 5.5rem minmax(0, 1fr);
+    gap: 0.45rem 0.75rem;
+    margin: 0;
+    font-size: 0.875rem;
+  }
+  .wizard-confirm-dl dt { color: var(--ag-text-3); }
+  .wizard-confirm-dl dd { margin: 0; color: var(--ag-text); overflow-wrap: anywhere; }
+
+  .wizard-confirm-total {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--ag-primary);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-primary-soft);
+    color: var(--ag-text);
+    font-weight: 600;
+  }
+  .wizard-confirm-total-value {
+    font-family: var(--ag-font-display);
+    font-size: 1.6rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .wizard-confirm-saved {
+    margin: 0;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--ag-good) 35%, transparent);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-good-soft);
+    color: var(--ag-good);
+    font-size: 0.86rem;
+  }
+  .wizard-confirm .wizard-nav { padding-top: 0.5rem; }
+
+  /* ── 付款完成 ── */
+  .wizard-success {
+    max-width: 36rem;
+    margin: 0 auto;
+    padding: 2.25rem 2rem;
+    border: 1px solid color-mix(in srgb, var(--ag-good) 35%, transparent);
+    border-radius: var(--ag-r-xl);
+    background:
+      radial-gradient(28rem 12rem at 50% 0%, var(--ag-good-soft), transparent 70%),
+      var(--ag-surface);
+    text-align: center;
+  }
+  .wizard-success-title { margin: 0; color: var(--ag-text); font-size: 1.5rem; font-weight: 700; }
+  .wizard-success-sub { margin: 0.35rem 0 0; color: var(--ag-text-2); font-size: 0.9rem; }
+  .wizard-success-dl {
+    display: grid;
+    grid-template-columns: 6.5rem minmax(0, 1fr);
+    gap: 0.5rem 0.75rem;
+    max-width: 28rem;
+    margin: 1.5rem auto 0;
+    padding: 1rem 1.2rem;
+    border: 1px solid var(--ag-border);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-bg-raised);
+    font-size: 0.875rem;
+    text-align: left;
+  }
+  .wizard-success-dl dt { color: var(--ag-text-3); }
+  .wizard-success-dl dd { margin: 0; color: var(--ag-text); font-weight: 500; overflow-wrap: anywhere; }
+  .wizard-success-dl dd.hl-balance { color: var(--ag-accent); font-weight: 700; }
+  .wizard-success-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.75rem; margin-top: 1.5rem; }
+
+  /* ── 響應式 ── */
+  @media (max-width: 900px) {
+    .wizard-checkout-grid { grid-template-columns: minmax(0, 1fr); }
+    .wizard-order-summary { position: static; grid-row: 1; }
+  }
+  @media (max-width: 640px) {
+    .wizard-stepper { gap: 0.4rem; margin: 1rem 1rem 0; }
+    .wizard-step {
+      display: flex;
+      min-height: 4.4rem;
+      flex-direction: column;
+      justify-content: center;
+      gap: 0.35rem;
+      padding: 0.55rem 0.3rem;
+      text-align: center;
+    }
+    .wizard-step-circle { width: 1.9rem; height: 1.9rem; font-size: 0.75rem; }
+    .wizard-step-copy { align-items: center; }
+    .wizard-step-kicker { display: none; }
+    .wizard-step-label { font-size: 0.72rem; }
+    .wizard-checkout-grid { padding: 1rem; }
+    .wizard-form-intro h3 { font-size: 1.05rem; }
+    .wizard-order-summary { padding: 1rem; }
+    .wizard-nav,
+    .wizard-confirm-plan,
+    .wizard-success-actions { flex-direction: column; align-items: stretch; }
+    .wizard-success { padding: 1.5rem 1rem; }
+    .wizard-success-dl { grid-template-columns: 5.5rem minmax(0, 1fr); }
+  }
+}

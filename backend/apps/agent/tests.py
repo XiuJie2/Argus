@@ -1,0 +1,1350 @@
+"""Hermes-Agent 單元測試。
+
+覆蓋面：
+- providers：ProviderError、ProviderChain fallback、不可重試錯誤直接拋出。
+- tools：TOOL_SCHEMAS 結構、ToolExecutor 對 mock page 的行為。
+- loop：迴圈 finish、max_steps、max_tokens、多 tool_calls 分攤 token。
+- findings：persist_agent_issues 寫入、去重、URL → Page 對應。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase, TransactionTestCase, override_settings
+
+from apps.agent.findings import persist_agent_issues, persist_agent_security_findings
+from apps.agent.loop import HermesAgent
+from apps.agent.providers import (
+    ChatProvider,
+    ChatResponse,
+    ProviderChain,
+    ProviderError,
+    ToolCall,
+)
+from apps.agent.runner import (
+    _enforce_agent_request,
+    _enforce_agent_websocket,
+    _make_agent_context,
+)
+from apps.agent.tools import (
+    TOOL_SCHEMAS,
+    ToolExecutor,
+    ToolOutcome,
+    build_tool_schemas,
+    redact_tool_arguments,
+    redact_tool_result,
+)
+from apps.scans.models import AgentSession, AgentStep, Finding, Page, ScanJob
+from apps.scans.services import PublicScanTargetError
+
+User = get_user_model()
+
+
+# ---------------- helpers ----------------
+
+
+def _make_scan_job(user) -> ScanJob:
+    return ScanJob.objects.create(
+        user=user,
+        original_url="https://example.com/",
+        normalized_url="https://example.com/",
+        origin="https://example.com",
+    )
+
+
+class AgentBrowserBoundaryTests(TestCase):
+    def test_context_blocks_service_workers_and_registers_both_routes(self):
+        context = MagicMock()
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+        browser = MagicMock()
+        browser.new_context = AsyncMock(return_value=context)
+
+        created = asyncio.run(_make_agent_context(browser, "https://example.com"))
+
+        self.assertIs(created, context)
+        browser.new_context.assert_awaited_once()
+        self.assertEqual(
+            browser.new_context.await_args.kwargs["service_workers"],
+            "block",
+        )
+        context.route.assert_awaited_once()
+        context.route_web_socket.assert_awaited_once()
+
+    def test_request_policy_blocks_private_and_cross_origin_document(self):
+        private_route = MagicMock()
+        private_route.abort = AsyncMock()
+        private_route.continue_ = AsyncMock()
+        private_request = MagicMock(url="http://127.0.0.1/", resource_type="image")
+        with patch(
+            "apps.agent.runner.assert_public_http_url",
+            side_effect=PublicScanTargetError("blocked"),
+        ):
+            asyncio.run(
+                _enforce_agent_request(private_route, private_request, "https://example.com")
+            )
+        private_route.abort.assert_awaited_once_with("blockedbyclient")
+        private_route.continue_.assert_not_awaited()
+
+        cross_route = MagicMock()
+        cross_route.abort = AsyncMock()
+        cross_route.continue_ = AsyncMock()
+        cross_request = MagicMock(
+            url="https://other.example/page", resource_type="document"
+        )
+        with patch(
+            "apps.agent.runner.assert_public_http_url",
+            return_value="https://other.example/page",
+        ):
+            asyncio.run(
+                _enforce_agent_request(cross_route, cross_request, "https://example.com")
+            )
+        cross_route.abort.assert_awaited_once_with("blockedbyclient")
+        cross_route.continue_.assert_not_awaited()
+
+    def test_request_policy_allows_public_subresource_and_same_origin_document(self):
+        for url, resource_type in (
+            ("https://cdn.example.net/app.js", "script"),
+            ("https://example.com/next", "document"),
+        ):
+            route = MagicMock()
+            route.abort = AsyncMock()
+            route.continue_ = AsyncMock()
+            request = MagicMock(url=url, resource_type=resource_type)
+            with patch("apps.agent.runner.assert_public_http_url", return_value=url):
+                asyncio.run(
+                    _enforce_agent_request(route, request, "https://example.com")
+                )
+            route.continue_.assert_awaited_once()
+            route.abort.assert_not_awaited()
+
+    def test_websocket_policy_blocks_cross_origin(self):
+        websocket_route = MagicMock(url="wss://other.example/socket")
+        websocket_route.close = AsyncMock()
+        with patch(
+            "apps.agent.runner.assert_public_websocket_url",
+            return_value="wss://other.example/socket",
+        ):
+            asyncio.run(
+                _enforce_agent_websocket(websocket_route, "https://example.com")
+            )
+        websocket_route.close.assert_awaited_once()
+        websocket_route.connect_to_server.assert_not_called()
+
+
+class FakeProvider(ChatProvider):
+    name = "fake"
+    default_model = "fake-model"
+    supports_tools = True
+
+    def __init__(self, responses, available: bool = True):
+        self._responses = list(responses)
+        self._available = available
+        self.calls = 0
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def chat_with_tools(self, **kwargs) -> ChatResponse:  # type: ignore[override]
+        self.calls += 1
+        next_item = self._responses.pop(0)
+        if isinstance(next_item, ProviderError):
+            raise next_item
+        return next_item
+
+
+def _chat_response_finish(content: str = "done") -> ChatResponse:
+    return ChatResponse(
+        provider="fake",
+        model="fake-model",
+        content=content,
+        tool_calls=[],
+        total_tokens=10,
+        finish_reason="stop",
+    )
+
+
+def _chat_response_tool(
+    tool_name: str, args: dict[str, Any], total_tokens: int = 5
+) -> ChatResponse:
+    return ChatResponse(
+        provider="fake",
+        model="fake-model",
+        content="",
+        tool_calls=[ToolCall(id=f"call_{tool_name}", name=tool_name, arguments=args)],
+        total_tokens=total_tokens,
+        finish_reason="tool_calls",
+    )
+
+
+class FakeExecutor:
+    """模擬 ToolExecutor，不真的開瀏覽器。"""
+
+    def __init__(self, outcomes: dict[str, ToolOutcome] | None = None):
+        self._outcomes = outcomes or {}
+        self.calls: list[tuple[str, dict]] = []
+
+    async def run(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+        self.calls.append((name, args))
+        if name in self._outcomes:
+            return self._outcomes[name]
+        if name == "finish":
+            return ToolOutcome(ok=True, result={"summary": args.get("summary", "")}, finish=True)
+        return ToolOutcome(ok=True, result={"ran": name})
+
+
+# ---------------- providers ----------------
+
+
+class ProviderChainTests(TestCase):
+    def test_fallback_on_429(self):
+        p1 = FakeProvider([ProviderError("fake", 429, "rate")])
+        p2 = FakeProvider([_chat_response_finish("ok")])
+        chain = ProviderChain(providers=[p1, p2])
+        resp = chain.chat_with_tools(messages=[{"role": "user", "content": "hi"}], tools=[{}])
+        self.assertEqual(p1.calls, 1)
+        self.assertEqual(p2.calls, 1)
+        self.assertEqual(resp.content, "ok")
+
+    def test_non_retryable_raises_immediately(self):
+        p1 = FakeProvider([ProviderError("fake", 400, "bad_prompt")])
+        p2 = FakeProvider([_chat_response_finish("never")])
+        chain = ProviderChain(providers=[p1, p2])
+        with self.assertRaises(ProviderError) as cm:
+            chain.chat_with_tools(messages=[], tools=[{}])
+        self.assertEqual(cm.exception.http_status, 400)
+        self.assertEqual(p2.calls, 0)
+
+    def test_skip_provider_without_tool_support(self):
+        no_tool = FakeProvider([_chat_response_finish("nope")])
+        no_tool.supports_tools = False
+        with_tool = FakeProvider([_chat_response_finish("ok")])
+        chain = ProviderChain(providers=[no_tool, with_tool])
+        resp = chain.chat_with_tools(messages=[], tools=[{"x": 1}])
+        self.assertEqual(no_tool.calls, 0)
+        self.assertEqual(with_tool.calls, 1)
+        self.assertEqual(resp.content, "ok")
+
+    def test_empty_chain_raises(self):
+        chain = ProviderChain(providers=[])
+        with self.assertRaises(ProviderError):
+            chain.chat_with_tools(messages=[], tools=None)
+
+
+# ---------------- tools ----------------
+
+
+class ToolSchemaTests(TestCase):
+    def test_schema_has_all_required_tools(self):
+        names = {t["function"]["name"] for t in TOOL_SCHEMAS}
+        expected = {
+            "click",
+            "type_text",
+            "scroll",
+            "get_visible_text",
+            "get_dom_summary",
+            "get_network_requests",
+            "get_page_html",
+            "get_storage",
+            "get_response_headers",
+            "decode_jwt",
+            "run_nuclei",
+            "navigate_and_observe",
+            "probe_payload_injection",
+            "forge_jwt",
+            "search_knowledge",
+            "send_message",
+            "collect_target_intel",
+            "take_screenshot",
+            "report_ux_issue",
+            "probe_sql_injection",
+            "probe_unauthorized_access",
+            "replay_request",
+            "report_security_issue",
+            "dispatch_specialist",
+            "finish",
+        }
+        self.assertEqual(names, expected)
+
+    def test_report_ux_issue_required_fields(self):
+        report = next(t for t in TOOL_SCHEMAS if t["function"]["name"] == "report_ux_issue")
+        required = report["function"]["parameters"]["required"]
+        for field in ("severity", "title", "description"):
+            self.assertIn(field, required)
+
+    def test_passive_schema_omits_sqlmap_tool(self):
+        names = {item["function"]["name"] for item in build_tool_schemas(False)}
+        self.assertNotIn("probe_sql_injection", names)
+
+    def test_authorized_active_schema_includes_sqlmap_tool(self):
+        names = {item["function"]["name"] for item in build_tool_schemas(True)}
+        self.assertIn("probe_sql_injection", names)
+
+    def test_build_tool_schemas_returns_deep_copy(self):
+        """build_tool_schemas 必須回傳獨立深拷貝，避免共用 mutable schema 被意外修改。"""
+        schemas = build_tool_schemas(True)
+        original = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "click")
+        copy_item = next(s for s in schemas if s["function"]["name"] == "click")
+        copy_item["function"]["name"] = "mutated"
+        self.assertNotEqual(original["function"]["name"], "mutated")
+
+
+class ToolExecutorTests(TestCase):
+    def _make_executor(self):
+        page = MagicMock()
+        page.url = "https://example.com/test"
+        page.locator = MagicMock()
+        page.evaluate = AsyncMock(return_value="hello")
+        page.screenshot = AsyncMock()
+        page.wait_for_load_state = AsyncMock()
+        return ToolExecutor(page=page, screenshot_dir="/tmp/agent", action_timeout_ms=1000), page
+
+    def test_unknown_tool_returns_error(self):
+        executor, _ = self._make_executor()
+        outcome = asyncio.run(executor.run("nope", {}))
+        self.assertFalse(outcome.ok)
+        self.assertIn("unknown_tool", outcome.result["error"])
+
+    def test_report_ux_issue_returns_issue_payload(self):
+        executor, page = self._make_executor()
+        outcome = asyncio.run(
+            executor.run(
+                "report_ux_issue",
+                {
+                    "severity": "high",
+                    "title": "結帳按鈕點不到",
+                    "description": "點擊結帳沒有任何反應，console 無錯誤。",
+                    "remediation": "確認 onClick handler 是否綁定。",
+                    "selector": ".checkout-btn",
+                },
+            )
+        )
+        self.assertTrue(outcome.ok)
+        self.assertIsNotNone(outcome.issue)
+        self.assertEqual(outcome.issue["severity"], "high")
+        self.assertEqual(outcome.issue["selector"], ".checkout-btn")
+        self.assertEqual(outcome.issue["url"], "https://example.com/test")
+
+    def test_report_ux_issue_rejects_missing_title(self):
+        executor, _ = self._make_executor()
+        outcome = asyncio.run(
+            executor.run(
+                "report_ux_issue",
+                {"severity": "low", "title": "", "description": "x"},
+            )
+        )
+        self.assertFalse(outcome.ok)
+
+    def test_finish_marks_finish_flag(self):
+        executor, _ = self._make_executor()
+        outcome = asyncio.run(executor.run("finish", {"summary": "ok"}))
+        self.assertTrue(outcome.finish)
+
+
+class RedactToolDataTests(TestCase):
+    """Step 5：probe_sql_injection 的 arguments 與 result 必須遮罩後才持久化。"""
+
+    def test_probe_arguments_redact_query_values(self):
+        clean = redact_tool_arguments(
+            "probe_sql_injection",
+            {"url": "https://example.com/search?q=secret&id=42"},
+        )
+        encoded = json.dumps(clean)
+        self.assertIn("%5BREDACTED%5D", encoded)
+        self.assertNotIn("secret", encoded)
+
+    def test_other_tool_arguments_pass_through(self):
+        """非 probe_sql_injection 的 tool 參數不應被遮罩。"""
+        original = {"selector": ".btn", "text": "hello"}
+        clean = redact_tool_arguments("click", dict(original))
+        self.assertEqual(clean, original)
+
+    def test_probe_result_removes_url_keeps_correlation(self):
+        """probe_sql_injection 的持久化 result 只保留 confirmed/blocked/error/correlation_id。"""
+        raw = {
+            "confirmed": True,
+            "correlation_id": "kali-sqlmap-sqli",
+            "url": "https://example.com/s?q=secret",
+            "note": "leaked note",
+        }
+        clean = redact_tool_result("probe_sql_injection", raw)
+        dumped = json.dumps(clean)
+        self.assertNotIn("secret", dumped)
+        self.assertNotIn("example.com", dumped)
+        self.assertNotIn("leaked note", dumped)
+        self.assertTrue(clean.get("confirmed"))
+        self.assertEqual(clean.get("correlation_id"), "kali-sqlmap-sqli")
+
+    def test_probe_result_keeps_blocked_and_error(self):
+        raw = {"confirmed": False, "blocked": "kali_disabled", "error": "", "url": "leak"}
+        clean = redact_tool_result("probe_sql_injection", raw)
+        self.assertFalse(clean.get("confirmed"))
+        self.assertEqual(clean.get("blocked"), "kali_disabled")
+        self.assertNotIn("leak", json.dumps(clean))
+
+    def test_other_tool_result_passes_through(self):
+        original = {"clicked": ".btn", "url_after": "https://example.com/page"}
+        clean = redact_tool_result("click", dict(original))
+        self.assertEqual(clean, original)
+
+
+class NavigateAndObserveTests(TestCase):
+    """navigate_and_observe：同源＋deep_mode 雙閘，dialog／渲染 DOM 觀察閉環。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="navuser", password="x")
+        self.scan_job = _make_scan_job(self.user)
+
+    def _deep_scan_job(self) -> ScanJob:
+        self.scan_job.scan_mode = ScanJob.ScanMode.ACTIVE
+        self.scan_job.active_testing_authorized = True
+        self.scan_job.save()
+        return self.scan_job
+
+    def _executor(self, scan_job):
+        page = MagicMock()
+        page.url = "https://example.com/search"
+        page.goto = AsyncMock()
+        page.content = AsyncMock(return_value="<html>rendered</html>")
+        page.evaluate = AsyncMock(return_value="visible text")
+        return ToolExecutor(page=page, screenshot_dir="/tmp/agent", scan_job=scan_job), page
+
+    def test_passive_mode_is_forbidden(self):
+        executor, page = self._executor(self.scan_job)
+        outcome = asyncio.run(
+            executor.run("navigate_and_observe", {"url": "https://example.com/?q=1"})
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "not_authorized_mode")
+        page.goto.assert_not_called()
+
+    def test_cross_origin_is_forbidden(self):
+        executor, page = self._executor(self._deep_scan_job())
+        outcome = asyncio.run(
+            executor.run("navigate_and_observe", {"url": "https://evil.com/?q=1"})
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "cross_origin_forbidden")
+        page.goto.assert_not_called()
+
+    def test_navigate_returns_execution_observations(self):
+        executor, page = self._executor(self._deep_scan_job())
+        captured = {}
+
+        def fake_on(event, handler):
+            captured.setdefault(event, []).append(handler)
+            if event == "dialog":
+                # 模擬頁面觸發 dialog：handler 收到 fake dialog 物件
+                class FakeDialog:
+                    type = "alert"
+                    message = "xss"
+
+                    def dismiss(self):
+                        import asyncio as _a
+
+                        return _a.sleep(0)
+
+                for h in captured[event]:
+                    h(FakeDialog())
+
+        page.on = MagicMock(side_effect=fake_on)
+        outcome = asyncio.run(
+            executor.run("navigate_and_observe", {"url": "https://example.com/?q=%3Cimg%3E"})
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.result["status"], "loaded")
+        self.assertEqual(outcome.result["dialogs"][0]["type"], "alert")
+        self.assertIn("rendered_html", outcome.result)
+        page.goto.assert_awaited_once()
+
+    def test_redact_result_masks_urls_and_truncates(self):
+        clean = redact_tool_result(
+            "navigate_and_observe",
+            {
+                "status": "loaded",
+                "url_after": "https://example.com/search?q=secretvalue",
+                "dialogs": [{"type": "alert", "message": "xss"}],
+                "console": [],
+                "rendered_html": "<html>" + "x" * 5000 + "</html>",
+                "visible_text": "text",
+            },
+        )
+        self.assertNotIn("secretvalue", json.dumps(clean))
+        self.assertLessEqual(len(clean["rendered_html"]), 2000)
+
+
+
+class ProbeSqlInjectionTests(TestCase):
+    """agent 的 probe_sql_injection tool：同源約束 + 授權鎖委派 + 確認才產 finding。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="probeuser", password="x")
+        self.scan_job = _make_scan_job(self.user)  # origin=https://example.com
+
+    def _executor(self):
+        page = MagicMock()
+        page.url = "https://example.com/"
+        return ToolExecutor(
+            page=page, screenshot_dir="/tmp/agent", scan_job=self.scan_job
+        )
+
+    def test_cross_origin_is_forbidden(self):
+        executor = self._executor()
+        with patch("apps.scans.security.kali_tools.run_sqlmap") as m:
+            outcome = asyncio.run(
+                executor.run("probe_sql_injection", {"url": "https://evil.com/?id=1"})
+            )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "cross_origin_forbidden")
+        m.assert_not_called()  # 跨站直接擋，不呼叫 sqlmap
+
+    def test_requires_query_parameter(self):
+        executor = self._executor()
+        with patch("apps.scans.security.kali_tools.run_sqlmap") as m:
+            outcome = asyncio.run(
+                executor.run("probe_sql_injection", {"url": "https://example.com/products"})
+            )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "no_query_parameter")
+        m.assert_not_called()
+
+    def test_blocked_when_run_sqlmap_reports_blocked(self):
+        executor = self._executor()
+        blocked = {"ok": False, "blocked_reason": "active_testing_unauthorized", "stdout": ""}
+        with patch("apps.scans.security.kali_tools.run_sqlmap", return_value=blocked):
+            outcome = asyncio.run(
+                executor.run("probe_sql_injection", {"url": "https://example.com/s?q=1"})
+            )
+        self.assertFalse(outcome.result["confirmed"])
+        self.assertEqual(outcome.result["blocked"], "active_testing_unauthorized")
+        self.assertIsNone(outcome.security_finding)
+
+    def test_not_vulnerable_produces_no_finding(self):
+        """Step 6：信任 confirmed=False，不再解析 stdout。"""
+        executor = self._executor()
+        res = {
+            "ok": True,
+            "blocked_reason": "",
+            "confirmed": False,
+            "stdout": "",
+            "evidence_summary": {},
+        }
+        with patch("apps.scans.security.kali_tools.run_sqlmap", return_value=res):
+            outcome = asyncio.run(
+                executor.run("probe_sql_injection", {"url": "https://example.com/s?q=1"})
+            )
+        self.assertTrue(outcome.ok)
+        self.assertFalse(outcome.result["confirmed"])
+        self.assertIsNone(outcome.security_finding)
+
+    def test_confirmed_produces_critical_security_finding(self):
+        """Step 6：信任 confirmed=True，不再解析 stdout；evidence 是 evidence_summary 的 JSON。"""
+        executor = self._executor()
+        res = {
+            "ok": True,
+            "blocked_reason": "",
+            "confirmed": True,
+            "stdout": "",
+            "evidence_summary": {
+                "parameter": "q",
+                "techniques": ["boolean-based blind"],
+                "dbms": "MySQL",
+            },
+        }
+        with patch("apps.scans.security.kali_tools.run_sqlmap", return_value=res):
+            outcome = asyncio.run(
+                executor.run("probe_sql_injection", {"url": "https://example.com/s?q=secret"})
+            )
+        self.assertTrue(outcome.result["confirmed"])
+        self.assertIsNotNone(outcome.security_finding)
+        f = outcome.security_finding
+        self.assertEqual(f["category"], "security")
+        self.assertEqual(f["severity"], "critical")
+        self.assertEqual(f["rule_id"], "kali-sqlmap-sqli")
+
+    def test_confirmed_finding_description_uses_redacted_url(self):
+        """Finding description 必須使用遮罩後的 URL，query value 不可外洩。"""
+        executor = self._executor()
+        res = {
+            "ok": True,
+            "blocked_reason": "",
+            "confirmed": True,
+            "stdout": "",
+            "evidence_summary": {"parameter": "q"},
+        }
+        with patch("apps.scans.security.kali_tools.run_sqlmap", return_value=res):
+            outcome = asyncio.run(
+                executor.run(
+                    "probe_sql_injection",
+                    {"url": "https://example.com/s?q=secret-value"},
+                )
+            )
+        description = outcome.security_finding["description"]
+        self.assertNotIn("secret-value", description)
+        self.assertIn("q", description)  # query key 保留
+
+    def test_confirmed_finding_evidence_is_json_dumps_of_summary(self):
+        """evidence 必須是 json.dumps(evidence_summary, sort_keys=True)，不放 raw stdout。"""
+        executor = self._executor()
+        evidence_summary = {"dbms": "MySQL", "parameter": "q", "techniques": ["error-based"]}
+        res = {
+            "ok": True,
+            "blocked_reason": "",
+            "confirmed": True,
+            "stdout": "raw should not leak",
+            "evidence_summary": evidence_summary,
+        }
+        with patch("apps.scans.security.kali_tools.run_sqlmap", return_value=res):
+            outcome = asyncio.run(
+                executor.run("probe_sql_injection", {"url": "https://example.com/s?q=1"})
+            )
+        evidence = outcome.security_finding.get("evidence", "")
+        # evidence 是 sorted JSON string
+        self.assertEqual(evidence, json.dumps(evidence_summary, sort_keys=True))
+        self.assertNotIn("raw should not leak", evidence)
+
+    def test_confirmed_result_excludes_target_url(self):
+        """Step 5/6：ToolOutcome.result 不可帶 target URL。"""
+        executor = self._executor()
+        res = {
+            "ok": True,
+            "blocked_reason": "",
+            "confirmed": True,
+            "stdout": "",
+            "evidence_summary": {"parameter": "q"},
+        }
+        with patch("apps.scans.security.kali_tools.run_sqlmap", return_value=res):
+            outcome = asyncio.run(
+                executor.run(
+                    "probe_sql_injection",
+                    {"url": "https://example.com/s?q=secret"},
+                )
+            )
+        dumped = json.dumps(outcome.result)
+        self.assertNotIn("secret", dumped)
+        self.assertNotIn("https://example.com/s", dumped)
+
+
+class ProbePayloadInjectionTests(TestCase):
+    """probe_payload_injection：家族化注入探測——閘門＋baseline 命中判定。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="payuser", password="x")
+        self.scan_job = _make_scan_job(self.user)
+
+    def _deep(self) -> ScanJob:
+        self.scan_job.scan_mode = ScanJob.ScanMode.ACTIVE
+        self.scan_job.active_testing_authorized = True
+        self.scan_job.save()
+        return self.scan_job
+
+    def _executor(self, scan_job):
+        page = MagicMock()
+        page.url = "https://example.com/"
+        page.evaluate = AsyncMock(return_value="")
+        page.context = MagicMock()
+        page.context.cookies = AsyncMock(return_value=[])
+        return ToolExecutor(page=page, screenshot_dir="/tmp/agent", scan_job=scan_job), page
+
+    def test_passive_mode_is_forbidden(self):
+        executor, _ = self._executor(self.scan_job)
+        with patch("httpx.Client"):
+            outcome = asyncio.run(
+                executor.run(
+                    "probe_payload_injection",
+                    {
+                        "url": "https://example.com/s?q=1",
+                        "family": "ssti",
+                        "method": "GET",
+                        "query_param": "q",
+                    },
+                )
+            )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "not_authorized_mode")
+
+    def test_cross_origin_is_forbidden(self):
+        executor, _ = self._executor(self._deep())
+        outcome = asyncio.run(
+            executor.run(
+                "probe_payload_injection",
+                {
+                    "url": "https://evil.com/s?q=1",
+                    "family": "ssti",
+                    "method": "GET",
+                    "query_param": "q",
+                },
+            )
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "cross_origin_forbidden")
+
+    def test_unknown_family_rejected(self):
+        executor, _ = self._executor(self._deep())
+        outcome = asyncio.run(
+            executor.run(
+                "probe_payload_injection",
+                {
+                    "url": "https://example.com/s?q=1",
+                    "family": "rce",
+                    "method": "GET",
+                    "query_param": "q",
+                },
+            )
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "unknown_family")
+
+    def test_get_without_query_param_rejected(self):
+        executor, _ = self._executor(self._deep())
+        outcome = asyncio.run(
+            executor.run(
+                "probe_payload_injection",
+                {
+                    "url": "https://example.com/s?q=1",
+                    "family": "ssti",
+                    "method": "GET",
+                    "query_param": "missing",
+                },
+            )
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "no_such_query_param")
+
+    def test_post_without_inject_field_rejected(self):
+        executor, _ = self._executor(self._deep())
+        outcome = asyncio.run(
+            executor.run(
+                "probe_payload_injection",
+                {"url": "https://example.com/s", "family": "nosql", "method": "POST"},
+            )
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "missing_inject_field")
+
+    def test_marker_hits_require_baseline_absence(self):
+        """ssti：payload 回應含 49 且 baseline 不含 → markers_hit；baseline 已含則不算。"""
+        executor, _ = self._executor(self._deep())
+
+        class FakeResp:
+            def __init__(self, status, text):
+                self.status_code = status
+                self.text = text
+
+        client = MagicMock()
+        # urlencode 後 {{7*7}} → %7B%7B7*7%7D%7D——以未編碼的 { 判斷 payload URL
+        client.get = MagicMock(
+            side_effect=lambda url: FakeResp(
+                200, "total 49 items" if "%7B%7B7" in url else "plain response"
+            )
+        )
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=client)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("httpx.Client", return_value=cm):
+            outcome = asyncio.run(
+                executor.run(
+                    "probe_payload_injection",
+                    {
+                        "url": "https://example.com/s?q=abc",
+                        "family": "ssti",
+                        "method": "GET",
+                        "query_param": "q",
+                    },
+                )
+            )
+        self.assertTrue(outcome.ok)
+        results = outcome.result["results"]
+        self.assertTrue(results)
+        # baseline（q=abc）不含 49 → mustache payload 命中
+        mustache = next(r for r in results if r["kind"] == "mustache")
+        self.assertIn("49", mustache["markers_hit"])
+
+    def test_marker_in_baseline_is_not_a_hit(self):
+        executor, _ = self._executor(self._deep())
+
+        class FakeResp:
+            def __init__(self, status, text):
+                self.status_code = status
+                self.text = text
+
+        client = MagicMock()
+        client.get = MagicMock(return_value=FakeResp(200, "page 49 of results"))
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=client)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("httpx.Client", return_value=cm):
+            outcome = asyncio.run(
+                executor.run(
+                    "probe_payload_injection",
+                    {
+                        "url": "https://example.com/s?q=abc",
+                        "family": "ssti",
+                        "method": "GET",
+                        "query_param": "q",
+                    },
+                )
+            )
+        self.assertTrue(outcome.ok)
+        for r in outcome.result["results"]:
+            self.assertEqual(r["markers_hit"], [])
+
+    def test_redact_result_whitelists_fields(self):
+        clean = redact_tool_result(
+            "probe_payload_injection",
+            {
+                "family": "ssti",
+                "baseline": {"status": 200, "body_length": 30},
+                "results": [
+                    {"kind": "mustache", "status": 200, "body_length": 40, "markers_hit": ["49"]},
+                    {"kind": "erb", "error": "ConnectError"},
+                ],
+            },
+        )
+        self.assertEqual(clean["family"], "ssti")
+        self.assertEqual(clean["results"][0]["markers_hit"], ["49"])
+        self.assertNotIn("payload", json.dumps(clean))
+
+
+class ForgeJwtTests(TestCase):
+    """forge_jwt：本地偽造（none／HS256 弱清單）＋deep_mode 閘。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="forgeuser", password="x")
+        self.scan_job = _make_scan_job(self.user)
+
+    def _executor(self, scan_job=None):
+        page = MagicMock()
+        page.url = "https://example.com/"
+        return ToolExecutor(
+            page=page,
+            screenshot_dir="/tmp/agent",
+            scan_job=scan_job or self.scan_job,
+        )
+
+    def test_passive_mode_is_forbidden(self):
+        executor = self._executor()
+        outcome = asyncio.run(
+            executor.run("forge_jwt", {"payload": {"role": "admin"}, "alg": "none"})
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "not_authorized_mode")
+
+    def test_alg_none_produces_unsigned_token(self):
+        import base64
+
+        self.scan_job.scan_mode = ScanJob.ScanMode.ACTIVE
+        self.scan_job.active_testing_authorized = True
+        self.scan_job.save()
+        executor = self._executor(self.scan_job)
+        outcome = asyncio.run(
+            executor.run("forge_jwt", {"payload": {"role": "admin"}, "alg": "none"})
+        )
+        self.assertTrue(outcome.ok)
+        tokens = outcome.result["tokens"]
+        self.assertEqual(len(tokens), 1)
+        token = tokens[0]["token"]
+        self.assertEqual(token.count("."), 2)
+        self.assertTrue(token.endswith("."))  # 無簽章段
+        # payload 是 base64——decode 後驗內容（明文不出現在 token 中）
+        payload_b64 = token.split(".")[1]
+        decoded = base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4))
+        self.assertIn(b"admin", decoded)
+
+    def test_hs256_runs_weak_secret_list(self):
+        self.scan_job.scan_mode = ScanJob.ScanMode.ACTIVE
+        self.scan_job.active_testing_authorized = True
+        self.scan_job.save()
+        executor = self._executor(self.scan_job)
+        outcome = asyncio.run(
+            executor.run("forge_jwt", {"payload": {"role": "admin"}, "alg": "HS256"})
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(len(outcome.result["tokens"]), 10)
+        # 每支都有非空簽章段且互不相同（不同密鑰）
+        sigs = {t["token"].split(".")[2] for t in outcome.result["tokens"]}
+        self.assertEqual(len(sigs), 10)
+        self.assertNotIn("", sigs)
+
+
+class MultipartRedactTests(TestCase):
+    """replay_request files 參數持久化遮罩：只留描述欄位＋內容長度。"""
+
+    def test_files_content_not_persisted(self):
+        clean = redact_tool_arguments(
+            "replay_request",
+            {
+                "url": "https://example.com/upload",
+                "method": "POST",
+                "files": [
+                    {
+                        "field": "avatar",
+                        "filename": "../evil.txt",
+                        "content": "x" * 5000,
+                        "content_type": "text/plain",
+                    }
+                ],
+            },
+        )
+        dumped = json.dumps(clean)
+        self.assertNotIn("xxxxx", dumped)
+        self.assertEqual(clean["files"][0]["content_length"], 5000)
+        self.assertEqual(clean["files"][0]["filename"], "../evil.txt")
+
+
+class SearchKnowledgeTests(TestCase):
+    """search_knowledge：離線知識庫檢索（全域工具，無目標互動）。"""
+
+    def test_retrieval_returns_relevant_topic(self):
+        from apps.agent.tools import _search_knowledge
+
+        outcome = _search_knowledge("password reset security question")
+        self.assertTrue(outcome.ok)
+        self.assertTrue(outcome.result["hits"])
+        self.assertIn("密碼重置", outcome.result["hits"][0]["topic"])
+
+    def test_chinese_query_matches(self):
+        from apps.agent.tools import _search_knowledge
+
+        outcome = _search_knowledge("優惠碼 預測")
+        self.assertTrue(outcome.ok)
+        self.assertTrue(outcome.result["hits"])
+        self.assertIn("商業邏輯", outcome.result["hits"][0]["topic"])
+
+    def test_no_match_returns_hint(self):
+        from apps.agent.tools import _search_knowledge
+
+        outcome = _search_knowledge("zzzqqqxxx")
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.result["hits"], [])
+
+    def test_executor_dispatches_to_module_function(self):
+        page = MagicMock()
+        page.url = "https://example.com/"
+        executor = ToolExecutor(page=page, screenshot_dir="/tmp/agent")
+        outcome = asyncio.run(
+            executor.run("search_knowledge", {"query": "upload extension bypass"})
+        )
+        self.assertTrue(outcome.ok)
+        self.assertTrue(outcome.result["hits"])
+
+
+class SendMessageTests(TestCase):
+    """send_message：填入＋送出＋回撈一步化（消 UI 送出波動）。"""
+
+    def _executor(self):
+        page = MagicMock()
+        page.url = "https://example.com/"
+        page.evaluate = AsyncMock(return_value="textarea")
+        locator = MagicMock()
+        locator.fill = AsyncMock()
+        locator.press = AsyncMock()
+        locator.click = AsyncMock()
+        locator.first = locator  # handler 取 .first——回自身（fill/press 已 mock）
+        page.locator = MagicMock(return_value=locator)
+        page.on = MagicMock()
+        page.remove_listener = MagicMock()
+        return (
+            ToolExecutor(page=page, screenshot_dir="/tmp/agent"),
+            page,
+            locator,
+        )
+
+    def test_empty_text_rejected(self):
+        executor, _, _ = self._executor()
+        outcome = asyncio.run(executor.run("send_message", {"text": "  "}))
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "empty_text")
+
+    def test_no_input_found_when_detection_fails(self):
+        executor, page, _ = self._executor()
+        page.evaluate = AsyncMock(return_value="")
+        outcome = asyncio.run(executor.run("send_message", {"text": "hi"}))
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "no_input_found")
+
+    def test_fill_press_enter_and_report_new_requests(self):
+        executor, page, locator = self._executor()
+        # 模擬 Enter 後 network log 新增一筆
+        executor._network_log = []
+        original_sleep = asyncio.sleep
+
+        async def fake_sleep(sec):
+            if sec == 1.5:
+                executor._network_log.append(
+                    {"method": "POST", "url": "https://example.com/chat", "status": 200}
+                )
+            return await original_sleep(0)
+
+        import apps.agent.tools as tools_module
+
+        with patch.object(tools_module.asyncio, "sleep", side_effect=fake_sleep):
+            outcome = asyncio.run(executor.run("send_message", {"text": "hello"}))
+        self.assertTrue(outcome.ok)
+        locator.fill.assert_awaited_once()
+        locator.press.assert_awaited_once_with("Enter")
+        self.assertEqual(outcome.result["new_requests"][0]["url"], "https://example.com/chat")
+
+
+class CollectTargetIntelTests(TestCase):
+    """collect_target_intel：同源閘＋命中上下文抽取＋redact。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="inteluser", password="x")
+        self.scan_job = _make_scan_job(self.user)
+
+    def _deep(self) -> ScanJob:
+        self.scan_job.scan_mode = ScanJob.ScanMode.ACTIVE
+        self.scan_job.active_testing_authorized = True
+        self.scan_job.save()
+        return self.scan_job
+
+    def _executor(self, scan_job):
+        page = MagicMock()
+        page.url = "https://example.com/"
+        page.evaluate = AsyncMock(return_value="")
+        page.context = MagicMock()
+        page.context.cookies = AsyncMock(return_value=[])
+        return ToolExecutor(page=page, screenshot_dir="/tmp/agent", scan_job=scan_job)
+
+    def test_cross_origin_rejected(self):
+        executor = self._executor(self._deep())
+        outcome = asyncio.run(
+            executor.run(
+                "collect_target_intel",
+                {"target": "bob@x.com", "urls": ["https://evil.com/api"]},
+            )
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.result["error"], "cross_origin_forbidden")
+
+    def test_snippets_extracted_with_context(self):
+        executor = self._executor(self._deep())
+
+        class FakeResp:
+            status_code = 200
+            text = '{"comments": ["bob@x.com owns a cat named Mikey", "other"]}'
+
+        client = MagicMock()
+        client.get = MagicMock(return_value=FakeResp())
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=client)
+        cm.__exit__ = MagicMock(return_value=False)
+        with patch("httpx.Client", return_value=cm):
+            outcome = asyncio.run(
+                executor.run(
+                    "collect_target_intel",
+                    {"target": "bob@x.com", "urls": ["https://example.com/api/Comments"]},
+                )
+            )
+        self.assertTrue(outcome.ok)
+        snippets = outcome.result["snippets"]
+        self.assertTrue(snippets)
+        self.assertIn("cat named Mikey", snippets[0]["context"])
+
+    def test_redact_urls(self):
+        clean = redact_tool_arguments(
+            "collect_target_intel",
+            {"target": "bob@x.com", "urls": ["https://example.com/a?x=secret"]},
+        )
+        self.assertNotIn("secret", json.dumps(clean))
+
+
+class SystemPromptDisciplineTests(TestCase):
+    """P0-2：假設與換道紀律存在於 system prompt 與 dispatcher 組裝（防回歸）。"""
+
+    def test_system_prompt_contains_hypothesis_pivot_rules(self):
+        from apps.agent.loop import DEFAULT_SYSTEM_PROMPT
+
+        self.assertIn("假設與換道紀律", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("交叉比對", DEFAULT_SYSTEM_PROMPT)
+
+    def test_dispatcher_prompt_template_contains_hypothesis_discipline(self):
+        """runner.py 的 specialist prompt 尾巴必須含假設模板（讀 source 鎖事實）。"""
+        from pathlib import Path
+
+        from apps.agent import runner as runner_module
+
+        source = Path(runner_module.__file__).read_text(encoding="utf-8")
+        self.assertIn("攻擊假設紀律", source)
+        self.assertIn("放棄條件", source)
+
+
+class PersistAgentSecurityFindingsTests(TestCase):
+    """agent security findings 落地。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="secuser", password="x")
+        self.scan_job = _make_scan_job(self.user)
+
+    def test_persists_security_finding_with_owasp_tag(self):
+        from apps.scans.models import Finding
+        from apps.scans.scanners import make_finding
+
+        f = make_finding(
+            category="security", severity="critical", rule_id="kali-sqlmap-sqli",
+            title="SQLi via agent", description="確認 https://example.com/s?q=1 可注入",
+            remediation="用參數化查詢", evidence="sqlmap: is vulnerable",
+            impact_area="vulnerability", confidence=1.0,
+        )
+        created = persist_agent_security_findings(self.scan_job, [f, f])  # 同 desc → 去重
+        self.assertEqual(len(created), 1)
+        obj = Finding.objects.get(scan_job=self.scan_job, rule_id="kali-sqlmap-sqli")
+        self.assertEqual(obj.category, "security")
+        self.assertEqual(obj.owasp_category, "A03")  # owasp_mapper 對 kali-sqlmap-sqli 的對映
+
+
+# ---------------- loop ----------------
+
+
+@override_settings(ARGUS_AGENT_MAX_STEPS=4, ARGUS_AGENT_MAX_TOKENS=10_000)
+class HermesAgentLoopTests(TransactionTestCase):
+    # 用 TransactionTestCase 避免 async + SQLite 跨 thread 寫入時的 "database table is locked"
+    # （TestCase 把每個 test 包在 transaction 中，sync_to_async 跨 thread 拿不到 lock）。
+    def setUp(self):
+        self.user = User.objects.create_user(username="agent_user", password="x123!Long")
+        self.scan_job = _make_scan_job(self.user)
+
+    def _run(self, agent: HermesAgent, prompt: str = "do it"):
+        return asyncio.run(agent.run(task_prompt=prompt))
+
+    def test_finish_via_natural_language(self):
+        chain = ProviderChain(providers=[FakeProvider([_chat_response_finish("all done")])])
+        agent = HermesAgent(self.scan_job, executor=FakeExecutor(), chain=chain)
+        result = self._run(agent)
+        self.assertEqual(result.status, AgentSession.Status.COMPLETED)
+        self.assertEqual(result.final_summary, "all done")
+        session = AgentSession.objects.get(id=result.session_id)
+        self.assertEqual(session.status, AgentSession.Status.COMPLETED)
+        self.assertEqual(AgentStep.objects.filter(session=session).count(), 1)
+
+    def test_finish_via_tool(self):
+        chain = ProviderChain(
+            providers=[
+                FakeProvider(
+                    [
+                        _chat_response_tool("get_visible_text", {}, total_tokens=20),
+                        _chat_response_tool("finish", {"summary": "done"}, total_tokens=30),
+                    ]
+                )
+            ]
+        )
+        agent = HermesAgent(self.scan_job, executor=FakeExecutor(), chain=chain)
+        result = self._run(agent)
+        self.assertEqual(result.status, AgentSession.Status.COMPLETED)
+        self.assertEqual(result.final_summary, "done")
+        self.assertEqual(result.total_tokens, 50)
+        # 2 個 step：get_visible_text + finish
+        self.assertEqual(AgentStep.objects.filter(session_id=result.session_id).count(), 2)
+
+    def test_max_steps_triggers_failure(self):
+        responses = [_chat_response_tool("get_visible_text", {}) for _ in range(10)]
+        chain = ProviderChain(providers=[FakeProvider(responses)])
+        agent = HermesAgent(self.scan_job, executor=FakeExecutor(), chain=chain)
+        result = self._run(agent)
+        self.assertEqual(result.status, AgentSession.Status.FAILED)
+        self.assertIn("max_steps_reached", result.error)
+
+    def test_max_tokens_triggers_failure(self):
+        responses = [
+            _chat_response_tool("get_visible_text", {}, total_tokens=8000) for _ in range(4)
+        ]
+        chain = ProviderChain(providers=[FakeProvider(responses)])
+        agent = HermesAgent(
+            self.scan_job,
+            executor=FakeExecutor(),
+            chain=chain,
+            max_tokens=10_000,
+        )
+        result = self._run(agent)
+        self.assertEqual(result.status, AgentSession.Status.FAILED)
+        self.assertIn("token_budget_exceeded", result.error)
+
+    def test_issue_collected_via_tool(self):
+        # 一個 round 內 LLM 一次回兩個 tool_calls：report_ux_issue + finish
+        multi = ChatResponse(
+            provider="fake",
+            model="fake-model",
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="report_ux_issue",
+                    arguments={
+                        "severity": "high",
+                        "title": "送出按鈕無反應",
+                        "description": "點了沒任何 feedback。",
+                    },
+                ),
+                ToolCall(id="c2", name="finish", arguments={"summary": "stop"}),
+            ],
+            total_tokens=40,
+        )
+        chain = ProviderChain(providers=[FakeProvider([multi])])
+        executor = FakeExecutor(
+            outcomes={
+                "report_ux_issue": ToolOutcome(
+                    ok=True,
+                    result={"reported": True, "title": "送出按鈕無反應"},
+                    issue={
+                        "severity": "high",
+                        "title": "送出按鈕無反應",
+                        "description": "點了沒任何 feedback。",
+                        "remediation": "",
+                        "selector": "button.submit",
+                        "url": "https://example.com/checkout",
+                    },
+                ),
+            }
+        )
+        agent = HermesAgent(self.scan_job, executor=executor, chain=chain)
+        result = self._run(agent)
+        self.assertEqual(result.status, AgentSession.Status.COMPLETED)
+        self.assertEqual(len(result.issues), 1)
+        self.assertEqual(result.issues[0]["title"], "送出按鈕無反應")
+        # 同 round 兩個 tool_calls 共用一次 LLM call 的 token，只記第一筆
+        steps = list(AgentStep.objects.filter(session_id=result.session_id).order_by("step_number"))
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[0].token_count, 40)
+        self.assertEqual(steps[1].token_count, 0)
+
+    def test_probe_sql_injection_step_persists_redacted_data(self):
+        """Step 5：AgentStep 的 tool_arguments 與 tool_result 必須遮罩 query value、移除 URL。"""
+        probe_response = ChatResponse(
+            provider="fake",
+            model="fake-model",
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="probe_sql_injection",
+                    arguments={"url": "https://example.com/search?q=secret&id=42"},
+                )
+            ],
+            total_tokens=20,
+            finish_reason="tool_calls",
+        )
+        chain = ProviderChain(
+            providers=[FakeProvider([probe_response, _chat_response_finish("done")])]
+        )
+        executor = FakeExecutor(
+            outcomes={
+                "probe_sql_injection": ToolOutcome(
+                    ok=True,
+                    result={
+                        "confirmed": True,
+                        "correlation_id": "kali-sqlmap-sqli",
+                        "url": "https://example.com/search?q=secret&id=42",
+                        "note": "leaked note",
+                    },
+                ),
+            }
+        )
+        agent = HermesAgent(self.scan_job, executor=executor, chain=chain)
+        result = self._run(agent)
+
+        step = AgentStep.objects.get(
+            session_id=result.session_id, tool_name="probe_sql_injection"
+        )
+        # tool_arguments：query value 必須被遮罩
+        args_json = json.dumps(step.tool_arguments)
+        self.assertNotIn("secret", args_json)
+        self.assertIn("%5BREDACTED%5D", args_json)
+        # tool_result：URL 與 note 必須被移除，confirmed / correlation_id 保留
+        result_json = json.dumps(step.tool_result)
+        self.assertNotIn("secret", result_json)
+        self.assertNotIn("example.com", result_json)
+        self.assertNotIn("leaked note", result_json)
+        self.assertTrue(step.tool_result.get("confirmed"))
+        self.assertEqual(
+            step.tool_result.get("correlation_id"), "kali-sqlmap-sqli"
+        )
+
+
+# ---------------- findings ----------------
+
+
+class PersistAgentIssuesTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="persist_user", password="x123!Long")
+        self.scan_job = _make_scan_job(self.user)
+        self.page = Page.objects.create(
+            scan_job=self.scan_job,
+            url="https://example.com/checkout",
+            final_url="https://example.com/checkout",
+            origin="https://example.com",
+            status_code=200,
+        )
+
+    def test_persists_with_matched_page(self):
+        issues = [
+            {
+                "severity": "high",
+                "title": "結帳流程斷裂",
+                "description": "點下一步沒反應。",
+                "remediation": "檢查 onClick handler。",
+                "selector": ".next",
+                "url": "https://example.com/checkout",
+            }
+        ]
+        created = persist_agent_issues(self.scan_job, issues)
+        self.assertEqual(len(created), 1)
+        finding = created[0]
+        self.assertEqual(finding.category, Finding.Category.UX)
+        self.assertEqual(finding.page, self.page)
+        self.assertIn("不要輸出完整修復程式碼", finding.ai_handoff_prompt)
+
+    def test_dedup_by_title(self):
+        issues = [
+            {
+                "severity": "low",
+                "title": "重複問題",
+                "description": "desc",
+                "url": "https://example.com/checkout",
+            },
+            {
+                "severity": "high",
+                "title": "重複問題",
+                "description": "desc2",
+                "url": "https://example.com/checkout",
+            },
+        ]
+        created = persist_agent_issues(self.scan_job, issues)
+        self.assertEqual(len(created), 1)
+
+    def test_no_url_falls_back_to_site_level(self):
+        issues = [
+            {
+                "severity": "medium",
+                "title": "站台層級問題",
+                "description": "整站找不到搜尋。",
+            }
+        ]
+        created = persist_agent_issues(self.scan_job, issues)
+        self.assertEqual(len(created), 1)
+        self.assertIsNone(created[0].page)
+
+    def test_invalid_severity_normalized(self):
+        issues = [
+            {
+                "severity": "bogus",
+                "title": "嚴重度錯",
+                "description": "x",
+            }
+        ]
+        created = persist_agent_issues(self.scan_job, issues)
+        self.assertEqual(created[0].severity, "low")
+
+    def test_skips_empty_title_or_description(self):
+        issues = [
+            {"severity": "low", "title": "", "description": "x"},
+            {"severity": "low", "title": "x", "description": ""},
+        ]
+        created = persist_agent_issues(self.scan_job, issues)
+        self.assertEqual(created, [])

@@ -1,0 +1,59 @@
+# agent 模組規則
+
+Claude Code 進 `backend/apps/agent/` 工作時，本檔在專案層 `CLAUDE.md` 之後自動載入；**ZCode／Codex 不會自動載入本檔**，動手前必須先讀（見根 `AGENTS.md` 模組規則必讀閘門）。
+
+**完整架構文件（角色目錄／工具清單／調校參數／迭代教訓）見
+[`../../../docs/hermes-agent-architecture.md`](../../../docs/hermes-agent-architecture.md)
+——改本模組前必讀。**
+
+## 職責
+
+掃描後的動態測試，兩種角色共用 `runner.run_agent_for_scan`（都受 `ARGUS_AGENT_ENABLED`
+總開關控制，預設 `false` 時直接 `return None`）：
+
+- **資安（deep_mode＝active＋authorized 才全開）**：recon agent → orchestrator agent
+  （subagent 派工）→ specialist subagent（8 角色：auth_idor/injection/logic_abuse/
+  info_leak/xss_hunter/jwt_token_abuse/file_upload/crypto）。
+- **擬真使用者 UX 測試（passive 也跑）**：全網站掃描且勾選 `ux` 維度時（`scan_plan.run_agent_ux`）
+  走 `DEFAULT_TASK_PROMPT_TEMPLATE` 單 session，像真實使用者操作找可用性問題，產生
+  `report_ux_issue`（UX 類 finding）。**不需要主動授權**，但 `may_submit_forms` 閘門決定能否
+  送出表單：deep_mode 或掃描目標已通過 `user_owns_domain` 才可送出；否則 runner 隱藏
+  `send_message` 工具、prompt 只填欄位不送出，避免在未驗證網域留下測試資料。
+  計費見 billing 的 `agent_ux_fee`（固定附加點數）。
+
+## 關鍵檔案
+
+| 檔案 | 職責 |
+|---|---|
+| `runner.py` | 流程編排：recon→orchestrator（首步 tool_choice 強制派工）→specialist；`SPECIALIST_ROLES` 角色目錄（desc＋when）；authenticated scan 帳密解密注入；`_merge` 結果合併 |
+| `providers.py` | `ChatProvider`／`ProviderChain`（**MiniMax-M3** 主力→GLM→Gemini 純文字 fallback）；`ProviderError` 只帶公開資訊 |
+| `loop.py` | `HermesAgent` tool-calling 迴圈；`_compact_stale_tool_results`（bulky 觀察快照壓縮）；`_inject_stall_hint`（連續 click 空轉導正）；`_inject_endgame_hint`（剩 10 步強制 report）；`forced_first_tool`（orchestrator 首步鎖定） |
+| `tools.py` | `ToolExecutor`：**26 個工具**＋離線知識庫 `knowledge/*.md`（search_knowledge 檢索；內容限通用方法論，禁目標特定）；`build_tool_schemas(..., allow_form_submit=True)`——deep_only 閘＋`allow_form_submit=False` 時另隱藏 `send_message`（未驗證網域 UX 測試不得送出表單）；`redact_tool_arguments/result` 持久化遮罩；JWT 於 snippet 壓縮 |
+| `findings.py` | `persist_agent_issues`＋`persist_agent_security_findings`（description 去重；owasp tag） |
+
+## 安全（硬規則）
+
+- **嚴禁**在 log／exception／repr／AgentStep 印出 API key；authenticated scan 帳密只以 Signer 加密入 DB、只在 prompt 注入處解密，**不得**進 log/findings/報告。
+- Playwright context 套 public target policy＋same-origin 主文件/WebSocket 攔截；`navigate_and_observe` 是唯一導覽工具，**runtime 同源再驗＋deep_mode 再驗**（不繞過 context route 邊界）；不得新增其他可跨源導覽的能力。
+- 主動工具（`probe_sql_injection`／`probe_unauthorized_access`／`replay_request`／`run_nuclei`／`navigate_and_observe`／`probe_payload_injection`）＝deep_mode schema 隔離＋runtime 再驗＋同源閘三層；任何新主動工具必須接同邊界。
+- `replay_request`：method 限 GET/POST/PUT/PATCH（禁 DELETE）；不跟隨 redirect；`store_token_key` 只寫 agent 自己的 browser context。
+- `report_security_issue` severity 封頂 **medium**（2026-09-28 起；AI 觀察未經工具或人工驗證可被利用，高風險以上只給工具確認項）；evidence 必填、經遮罩。description 開頭固定「AI Agent 在實際操作網站時觀察到：」、附證據中 IP 的自動核對（`security/ip_context.describe_ips`：私有 IP／本站公開 IP／不明，WAF 攔截頁常回顯的是掃描器自己的 IP），`evidence_json.assessment` 寫成立條件／實際觀察／尚缺證據／驗證方法。
+- specialist 不掛 `dispatch_specialist`（防遞迴）；orchestrator 只掛 dispatch/finish/report。
+- Kali 攻擊鏈正式環境 disabled；啟用 runbook 見 `docs/runbooks/kali-sqlmap-rollout.md`。
+
+## 已知限制（2026-09-28 定案，詳見架構文件第 9 節）
+
+- **M3 工具採用極限**：`collect_target_intel` 三路引導×三輪 0 呼叫（auth 角色注意力在本業，條件子項被跳過）——工具正確但模型不叫；換更強模型時採用率＝第一測點
+- **Chatbot 挑戰判定**：超出 OWASP LLM 通用方法論＝黑箱禁區（chat 鏈本身已通：/rest/chat 全鏈＋900k 盒下首件 report）
+- **chat 場景 token**：500k 不足（回應全文進 context）——定向輪用 exec 進程同步 apply 覆寫（Celery 常駐進程不吃 exec env）
+- 26/112 為 M3 架構高原（22 全掃＋8 定向窮盡）；四類別首穿（帳號接管/DOM XSS/商業邏輯/上傳）
+
+## 禁止事項
+
+| 禁止 | 原因 | 正確做法 |
+|---|---|---|
+| 印出／持久化 API key、測試帳密明文 | 機密外洩 | 只記 provider／HTTP 狀態／model ID |
+| 給 agent 任意 `navigate(url)`／跨源導覽 tool | 繞過 same-origin | 導覽僅限 `navigate_and_observe`（同源＋deep_mode 三層閘） |
+| `ARGUS_AGENT_ENABLED` 預設改 True | 成本與風險不可控 | 預設 False，明確授權才開 |
+| prompt 寫入任何目標特定路徑／答案 | 破壞黑箱泛化（#22 稽核先例：通用路徑例子 `/rest/`、`/api/` 也移除） | 只寫方法論與工具描述；payload／字典屬工具配備（使用者裁定） |
+| 硬編碼 provider key／endpoint | 機密外洩 | 放 `.env` |

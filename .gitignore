@@ -1,0 +1,53 @@
+.env
+CLAUDE.local.md
+.claude/settings.local.json
+GoogleCloud_ApiKey.json
+client_secret_*.json
+交接資料/
+螢幕擷取畫面*.png
+Screenshot*.png
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+dist/
+build/
+.sisyphus/*.local.md
+.omc/
+.mimosa/
+.scratch/
+.zcode/
+backend/db.sqlite3
+db.sqlite3
+backend/media/
+backend/staticfiles/
+.ruff_cache/
+.ms-playwright/
+frontend/dist/
+
+# === 個人 / 工具暫存 / 大型素材（不該推上 GitHub）===
+# Playwright MCP 工具暫存
+.playwright-mcp/
+# 個人 Obsidian vault 設定（每人 / 每機不同，不進共用 repo）
+.obsidian/
+# 本機截圖工具與輸出
+_shot.py
+_shots/
+# 個人課程 / 學校資料（避免隱私洩漏，逐檔指定不用 *.pdf 全包以免誤殺合法文件）
+114-2_日間部專題發表順序暨發表提醒(二技及四技)-115.6.2.pdf
+115年_時間(按鈴)圖.doc
+# 設計 / 素材草稿目錄與圖檔（容量大、不屬於 source；要納入請改放 frontend/src/assets/）
+文件生成/
+網站範例/
+過場動畫和網站設計範本/
+粒子穿越特色.jpg
+網站商標.png
+
+# Dev email outputs (filebased EmailBackend)
+backend/dev_emails/*.log
+
+# 資料庫備份（pg_dump 含真實使用者個資，絕不可推上公開 repo）
+backups/
+
+# 本機部署維運紀錄含私有環境資料，禁止進版控。
+infra/

@@ -1,0 +1,559 @@
+import ipaddress
+import os
+from datetime import timedelta
+from pathlib import Path
+from urllib.parse import urlparse
+
+import dj_database_url
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BASE_DIR.parent
+
+load_dotenv(PROJECT_ROOT / ".env")
+
+raw_playwright_browsers_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH", ".ms-playwright")
+playwright_browsers_path = Path(raw_playwright_browsers_path)
+if not playwright_browsers_path.is_absolute():
+    playwright_browsers_path = PROJECT_ROOT / playwright_browsers_path
+PLAYWRIGHT_BROWSERS_PATH = str(playwright_browsers_path)
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_BROWSERS_PATH
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_list(name: str, default: str = "") -> list[str]:
+    value = os.getenv(name, default)
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("DJANGO_SECRET_KEY must be set in .env")
+
+PASSWORD_RESET_TOKEN_PEPPER = os.getenv("PASSWORD_RESET_TOKEN_PEPPER")
+if not PASSWORD_RESET_TOKEN_PEPPER:
+    raise RuntimeError("PASSWORD_RESET_TOKEN_PEPPER must be set in .env")
+
+DEBUG = env_bool("DJANGO_DEBUG", default=False)
+ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+TRUSTED_PROXY_CIDRS = env_list("TRUSTED_PROXY_CIDRS")
+TRUST_PROXY_SSL_HEADER = env_bool("TRUST_PROXY_SSL_HEADER", default=False)
+ARGUS_EGRESS_PROXY_URL = os.getenv("ARGUS_EGRESS_PROXY_URL", "").strip()
+if ARGUS_EGRESS_PROXY_URL:
+    parsed_egress_proxy = urlparse(ARGUS_EGRESS_PROXY_URL)
+    try:
+        egress_proxy_port = parsed_egress_proxy.port
+    except ValueError:
+        egress_proxy_port = None
+    if parsed_egress_proxy.scheme not in {"http", "https"} or not (
+        parsed_egress_proxy.hostname and egress_proxy_port
+    ) or any(
+        (
+            parsed_egress_proxy.username is not None,
+            parsed_egress_proxy.password is not None,
+            parsed_egress_proxy.path not in {"", "/"},
+            parsed_egress_proxy.query,
+            parsed_egress_proxy.fragment,
+        )
+    ):
+        raise RuntimeError("ARGUS_EGRESS_PROXY_URL must be an http(s) URL with port")
+    egress_no_proxy = "localhost,127.0.0.1,::1,db,redis,web,frontend,egress-proxy"
+    for proxy_env_name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        os.environ[proxy_env_name] = ARGUS_EGRESS_PROXY_URL
+    # 不沿用宿主的 NO_PROXY=*；否則 requests/子程序會靜默繞過受控 proxy。
+    os.environ["NO_PROXY"] = egress_no_proxy
+    os.environ["no_proxy"] = egress_no_proxy
+
+INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "corsheaders",
+    "rest_framework",
+    "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
+    "apps.accounts",
+    "apps.scans",
+    "apps.agent",
+    "apps.rebuild",
+    "apps.billing",
+    "apps.reviews",
+    "apps.admin_api",
+    "apps.content",
+    "apps.insights",
+    "apps.integrations",
+    # OpenAPI schema 產生器：前端的 API 型別由它產出的 schema 生成，
+    # 欄位對不上會變成前端的編譯錯誤而不是執行期的靜默失效
+    "drf_spectacular",
+]
+
+MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
+    "config.proxy_headers.TrustedProxyHeadersMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+
+ROOT_URLCONF = "config.urls"
+
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        # 把 Vite build 出的 index.html 視為 Django 可渲染的模板，讓 runserver 一個命令就能服務 SPA
+        "DIRS": [PROJECT_ROOT / "frontend" / "dist"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+
+WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
+
+# conn_max_age=0：每個請求結束即關閉 DB 連線。
+# 原因：web 用多執行緒 runserver，搭配 conn_max_age>0 的持久連線 +
+# 前端高頻輪詢，會讓連線只進不出，撐滿 Postgres max_connections（100）後
+# 整個 API 回 500「too many clients already」。設 0 讓連線數被「同時處理中的
+# 請求數」上限住，不再累積。改用 gunicorn 綁定 worker 數後可再評估調回 >0。
+DATABASES = {
+    "default": dj_database_url.config(
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        conn_max_age=0,
+    )
+}
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {"min_length": 10},
+    },
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    # 自訂複雜度：必須同時含字母 + 數字（Django 內建缺這一塊）
+    {"NAME": "apps.accounts.validators.ComplexityValidator"},
+]
+
+LANGUAGE_CODE = "zh-hant"
+TIME_ZONE = "Asia/Taipei"
+USE_I18N = True
+USE_TZ = True
+
+STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+MEDIA_URL = os.getenv("ARGUS_MEDIA_URL", "/media/")
+MEDIA_ROOT = Path(os.getenv("ARGUS_MEDIA_ROOT", str(BASE_DIR / "media")))
+ARGUS_MEDIA_STORAGE_BACKEND = os.getenv(
+    "ARGUS_MEDIA_STORAGE_BACKEND",
+    "django.core.files.storage.FileSystemStorage",
+)
+STORAGES = {
+    "default": {"BACKEND": ARGUS_MEDIA_STORAGE_BACKEND},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
+if ARGUS_MEDIA_STORAGE_BACKEND == "storages.backends.s3.S3Storage":
+    AWS_STORAGE_BUCKET_NAME = os.getenv("ARGUS_MEDIA_BUCKET", "")
+    if not AWS_STORAGE_BUCKET_NAME:
+        raise RuntimeError("S3 media storage requires ARGUS_MEDIA_BUCKET")
+    AWS_S3_ENDPOINT_URL = os.getenv("ARGUS_MEDIA_ENDPOINT_URL") or None
+    AWS_S3_REGION_NAME = os.getenv("ARGUS_MEDIA_REGION") or None
+    AWS_S3_CUSTOM_DOMAIN = os.getenv("ARGUS_MEDIA_CUSTOM_DOMAIN") or None
+    AWS_S3_ADDRESSING_STYLE = os.getenv("ARGUS_MEDIA_ADDRESSING_STYLE", "auto")
+    AWS_QUERYSTRING_AUTH = env_bool("ARGUS_MEDIA_SIGNED_URLS", default=True)
+    AWS_QUERYSTRING_EXPIRE = int(os.getenv("ARGUS_MEDIA_URL_EXPIRE_SECONDS", "3600"))
+    AWS_S3_FILE_OVERWRITE = False
+    AWS_DEFAULT_ACL = None
+DATA_UPLOAD_MAX_MEMORY_SIZE = 6 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 6 * 1024 * 1024
+
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+AUTH_USER_MODEL = "accounts.User"
+
+CORS_ALLOWED_ORIGINS = env_list(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173",
+)
+
+CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "")
+
+# ============================================================
+# 安全 HTTP 頭部（由 SecurityMiddleware 與 XFrameOptionsMiddleware 注入）
+# ============================================================
+SECURE_PROXY_SSL_HEADER = (
+    ("HTTP_X_FORWARDED_PROTO", "https") if TRUST_PROXY_SSL_HEADER else None
+)
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_HSTS_SECONDS = 0 if DEBUG else int(os.getenv("SECURE_HSTS_SECONDS", "60"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
+SECURE_HSTS_PRELOAD = False
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+X_FRAME_OPTIONS = "DENY"
+
+# ============================================================
+# Logging
+# ============================================================
+# 之前完全沒有 LOGGING 設定：掃描失敗時 DB 只留下例外的類別名（例如
+# 「掃描執行失敗 [analysis:AttributeError]」），沒有 stack，線上排查只能靠猜。
+#
+# 輸出到 stdout 就好——K8s 與 docker compose 都從 stdout 收 log，寫檔反而要處理
+# 輪替與磁碟。等級用環境變數控制，預設 INFO。
+#
+# 注意：這裡只設輸出管道。**任何 log 都不得印出 Secret、Token、密碼或 .env 內容**，
+# 呼叫端請只記錄鍵名與布林結果（見 docs/environment-preflight.md）。
+LOG_LEVEL = os.getenv("DJANGO_LOG_LEVEL", "INFO").upper()
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "[{asctime}] {levelname} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        },
+    },
+    "root": {"handlers": ["console"], "level": LOG_LEVEL},
+    "loggers": {
+        # 專案自己的程式一律吃 LOG_LEVEL
+        "apps": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        # Django 的 request logger 預設會把 4xx 也記成 warning，維持預設即可
+        "django": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        # SQL 查詢只在明確要 debug 時才開，否則會把 log 淹掉
+        "django.db.backends": {
+            "handlers": ["console"],
+            "level": os.getenv("DJANGO_SQL_LOG_LEVEL", "WARNING").upper(),
+            "propagate": False,
+        },
+    },
+}
+
+# ============================================================
+# Cache（DRF throttle 依賴此後端儲存 rate limit 計數）
+# ============================================================
+# 預設 LocMemCache：per-process 記憶體，dev/test 夠用；production 多 worker 應設
+# DJANGO_CACHE_BACKEND=django.core.cache.backends.redis.RedisCache + DJANGO_CACHE_LOCATION=redis://...
+CACHES = {
+    "default": {
+        "BACKEND": os.getenv(
+            "DJANGO_CACHE_BACKEND",
+            "django.core.cache.backends.locmem.LocMemCache",
+        ),
+        "LOCATION": os.getenv("DJANGO_CACHE_LOCATION", "argus-default"),
+    }
+}
+
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ),
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
+    ),
+    # 全域 throttle：anon 用 IP、user 用 user.id 計數；ScopedRateThrottle 供敏感端點使用
+    "DEFAULT_THROTTLE_CLASSES": (
+        "config.throttling.AnonRateThrottle",
+        "config.throttling.UserRateThrottle",
+        "config.throttling.ScopedRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        # 預設額度（含前端輪詢空間）
+        "anon": os.getenv("THROTTLE_ANON", "200/min"),
+        "user": os.getenv("THROTTLE_USER", "3000/hour"),
+        # 敏感端點的 scope 額度（防暴力破解、垃圾註冊、Email 洪水）
+        "login": os.getenv("THROTTLE_LOGIN", "10/min"),
+        "register": os.getenv("THROTTLE_REGISTER", "10/hour"),
+        "password_reset": os.getenv("THROTTLE_PASSWORD_RESET", "5/hour"),
+        "insights": os.getenv("THROTTLE_INSIGHTS", "30/hour"),
+        "scan_create": os.getenv("THROTTLE_SCAN_CREATE", "30/hour"),
+        "avatar_upload": os.getenv("THROTTLE_AVATAR_UPLOAD", "20/hour"),
+        "partner_inquiry": os.getenv("THROTTLE_PARTNER_INQUIRY", "5/hour"),
+    },
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        minutes=int(os.getenv("JWT_ACCESS_TOKEN_LIFETIME", "60"))
+    ),
+    # Refresh token 明確設定天數（SimpleJWT 預設 1 天，這裡拉長並允許 .env 覆寫）
+    "REFRESH_TOKEN_LIFETIME": timedelta(
+        days=int(os.getenv("JWT_REFRESH_TOKEN_LIFETIME_DAYS", "7"))
+    ),
+    # 每次呼叫 /refresh/ 換發新 access 時，同時發新的 refresh，舊 refresh 立即失效（透過 blacklist）
+    # 防止 refresh token 一被竊就長期存取；需搭配 rest_framework_simplejwt.token_blacklist app
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "SIGNING_KEY": os.getenv("JWT_SECRET_KEY", SECRET_KEY),
+}
+AUTH_REFRESH_COOKIE_NAME = "argus_refresh_token"
+AUTH_REFRESH_COOKIE_SECURE = not DEBUG
+AUTH_REFRESH_COOKIE_SAMESITE = "Lax"
+
+CELERY_BROKER_URL = os.getenv(
+    "CELERY_BROKER_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0")
+)
+CELERY_RESULT_BACKEND = os.getenv(
+    "CELERY_RESULT_BACKEND",
+    os.getenv("REDIS_URL", "redis://localhost:6379/1"),
+)
+CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", default=False)
+# 硬限 60 分，OS 強制殺掉 worker；軟限 55 分，task 內捕捉並優雅退出。
+CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "3600"))
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "3300"))
+
+ARGUS_DEFAULT_MAX_DEPTH = 3
+ARGUS_DEFAULT_MAX_PAGES = 50
+ARGUS_ACTIVE_MAX_RPS = 2
+ARGUS_PASSIVE_MAX_RPS = 5
+ARGUS_SCANNER_USER_AGENT = "SiteSense-AI-Scanner/1.0 (authorized-audit)"
+ARGUS_AUTO_QUEUE_SCANS = env_bool("ARGUS_AUTO_QUEUE_SCANS", default=not DEBUG)
+# 網域所有權驗證通過後的有效天數（主動測試閘門以此判斷是否過期）
+ARGUS_DOMAIN_VERIFICATION_TTL_DAYS = int(
+    os.getenv("ARGUS_DOMAIN_VERIFICATION_TTL_DAYS", "90")
+)
+# 本機／隔離 demo 旁路：放行私網位址、localhost、單標籤 hostname 與非標準 port，
+# 供 Docker 網路內的受控測試目標（例如 OWASP Juice Shop）使用。
+# 僅限 DEBUG 環境（scans.E002 鎖定）；正式環境一律維持公開目標政策。
+ARGUS_ALLOW_PRIVATE_TARGETS = env_bool("ARGUS_ALLOW_PRIVATE_TARGETS", default=False)
+
+# Katana 補充型資安爬蟲（Docker 執行，不污染本機環境）
+# 前提：本機需有 Docker Desktop 並已 pull 過 projectdiscovery/katana
+KATANA_DOCKER_IMAGE = os.getenv("KATANA_DOCKER_IMAGE", "projectdiscovery/katana:latest")
+KATANA_TIMEOUT = int(os.getenv("KATANA_TIMEOUT", "90"))  # subprocess 超時（秒）
+# Nuclei deep 模式硬逾時（秒）。2 RPS 下全模板掃描可能超過預設 300 秒；
+# 本機／隔離 demo 掃受控目標（如 Juice Shop）可透過環境變數放寬。
+ARGUS_NUCLEI_DEEP_TIMEOUT = int(os.getenv("ARGUS_NUCLEI_DEEP_TIMEOUT", "300"))
+
+# Phase 2 Hermes-Agent 上限（避免 token 失控與無限循環）
+ARGUS_AGENT_MAX_STEPS = int(os.getenv("ARGUS_AGENT_MAX_STEPS", "20"))
+ARGUS_AGENT_MAX_TOKENS = int(os.getenv("ARGUS_AGENT_MAX_TOKENS", "60000"))
+ARGUS_AGENT_STEP_TIMEOUT = int(os.getenv("ARGUS_AGENT_STEP_TIMEOUT", "30"))
+ARGUS_AGENT_ENABLED = env_bool("ARGUS_AGENT_ENABLED", default=False)
+
+# 修正產出（Fix Output）產生引擎——bounded 單次結構化產生，非 agent 迴圈。
+# 預設關閉，與 ARGUS_AGENT_ENABLED 同模式：啟用才會花 token。
+ARGUS_FIXGEN_ENABLED = env_bool("ARGUS_FIXGEN_ENABLED", default=False)
+# 空字串＝沿用 provider chain 各 provider 的 default_model（fallback 語義）。
+ARGUS_FIXGEN_MODEL = os.getenv("ARGUS_FIXGEN_MODEL", "").strip()
+ARGUS_FIXGEN_MAX_TOKENS = int(os.getenv("ARGUS_FIXGEN_MAX_TOKENS", "4096"))
+# 單次產生的 HTTP 逾時（秒）。推理型模型對長 prompt 的完整回應可能遠超
+# provider 預設的 60 秒（實測 MiniMax-M2.7 約 77 秒），故另立較寬上限。
+ARGUS_FIXGEN_TIMEOUT = int(os.getenv("ARGUS_FIXGEN_TIMEOUT", "180"))
+
+# 網頁複刻與優化（OpenCode agent server）
+# 預設關閉：優化階段會呼叫外部 agent 花錢，而且該 agent 在它那台主機上有
+# shell 權限——沒有明確授權就不該讓 worker 打得到它。
+ARGUS_OPENCODE_ENABLED = env_bool("ARGUS_OPENCODE_ENABLED", default=False)
+ARGUS_OPENCODE_BASE_URL = os.getenv("ARGUS_OPENCODE_BASE_URL", "").strip().rstrip("/")
+ARGUS_OPENCODE_USERNAME = os.getenv("ARGUS_OPENCODE_USERNAME", "")
+ARGUS_OPENCODE_PASSWORD = os.getenv("ARGUS_OPENCODE_PASSWORD", "")
+# 預設指向受限的專用 agent，不是全權限的內建 build。agent 不存在時 opencode
+# 回 500、功能整個不動——fail closed，總比安靜地用全權限 agent 跑好。
+# 建立方式見 docs/opencode-site-rebuild.md。
+ARGUS_OPENCODE_AGENT = os.getenv("ARGUS_OPENCODE_AGENT", "argus-rebuild")
+# 空字串＝用 server 端的預設模型。要指定就寫 provider/model（例：opencode/big-pickle）。
+ARGUS_OPENCODE_MODEL = os.getenv("ARGUS_OPENCODE_MODEL", "").strip()
+# agent 端 session 的 cwd。這個目錄必須在 agent 主機上**事先存在**——不存在時
+# session 建得起來，但送 prompt 會回 500（實測 opencode 1.18.29）。
+ARGUS_OPENCODE_WORKSPACE = os.getenv("ARGUS_OPENCODE_WORKSPACE", "/tmp/opencode")
+ARGUS_OPENCODE_TIMEOUT = int(os.getenv("ARGUS_OPENCODE_TIMEOUT", "900"))
+# 送進 prompt 的 HTML 上限。超過就截斷並在 prompt 裡明講，避免 agent 自行補完。
+ARGUS_OPENCODE_MAX_SNAPSHOT_BYTES = int(
+    os.getenv("ARGUS_OPENCODE_MAX_SNAPSHOT_BYTES", "400000")
+)
+
+# Phase 3 Kali 主動驗證工具
+# 預設關閉；即使開啟，仍需 scan_mode=active 且 active_testing_authorized=True 才會執行（三重鎖）
+ARGUS_KALI_ENABLED = env_bool("ARGUS_KALI_ENABLED", default=False)
+ARGUS_KALI_BACKEND = os.getenv("ARGUS_KALI_BACKEND", "disabled").strip().lower()
+ARGUS_KALI_CONTAINER = os.getenv("ARGUS_KALI_CONTAINER", "argus-kali-1")
+ARGUS_KALI_NAMESPACE = os.getenv("ARGUS_KALI_NAMESPACE", "argus-kali")
+ARGUS_KALI_RUNNER_IMAGE = os.getenv("ARGUS_KALI_RUNNER_IMAGE", "").strip()
+ARGUS_KALI_SQLMAP_VERSION = os.getenv("ARGUS_KALI_SQLMAP_VERSION", "1.10")
+ARGUS_KALI_TIMEOUT = int(os.getenv("ARGUS_KALI_TIMEOUT", "120"))
+ARGUS_KALI_STARTUP_GRACE_SECONDS = 30
+ARGUS_KALI_MAX_TARGETS = 3
+ARGUS_KALI_LOCK_WAIT_SECONDS = 420
+ARGUS_KALI_LOCK_LEASE_SECONDS = 450
+ARGUS_KALI_SCAN_DEADLINE_SECONDS = 900
+ARGUS_KALI_STATE_TTL_SECONDS = 86400
+ARGUS_KALI_TTL_AFTER_FINISHED_SECONDS = 300
+ARGUS_KALI_RESULT_MAX_BYTES = 16384
+ARGUS_KALI_REDIS_URL = os.getenv(
+    "ARGUS_KALI_REDIS_URL",
+    os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+)
+
+# Google OAuth Client ID（從 Google Cloud Console > Credentials 取得）
+# 一般使用者透過 Google 帳號登入時用於驗證 ID Token；空字串代表未啟用
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+GSC_OAUTH_CLIENT_ID = os.getenv("GSC_OAUTH_CLIENT_ID", GOOGLE_OAUTH_CLIENT_ID).strip()
+GSC_OAUTH_CLIENT_SECRET = os.getenv("GSC_OAUTH_CLIENT_SECRET", "").strip()
+GSC_OAUTH_REDIRECT_URI = os.getenv(
+    "GSC_OAUTH_REDIRECT_URI",
+    "https://ars.clouda.dpdns.org/api/integrations/gsc/callback",
+).strip()
+GSC_FRONTEND_RETURN_PATH = os.getenv(
+    "GSC_FRONTEND_RETURN_PATH",
+    "/projects/{project_id}/settings",
+).strip()
+GSC_TOKEN_ENCRYPTION_KEY = os.getenv("GSC_TOKEN_ENCRYPTION_KEY", "").strip()
+
+# 點數制度（取代舊的 UserScanQuota 月次數配額）
+# - 每月自動發放給所有使用者的贈點
+# - 掃描按「維度」計費：費用＝頁數 × 勾選維度數 × 此值，建立時預扣、
+#   完成後依實際頁數退差（五維全選＝每頁 10 coin，與舊每頁定價相同）
+ARGUS_MONTHLY_BONUS_COINS = int(os.getenv("ARGUS_MONTHLY_BONUS_COINS", "200"))
+ARGUS_COIN_PER_CATEGORY = int(os.getenv("ARGUS_COIN_PER_CATEGORY", "2"))
+# 網頁複刻的計費：預扣上限 → 依 agent 回報的實際用量結算退差額，
+# 與掃描的 hold_for_scan / settle_scan_actual 同一套模式。
+#
+# 預扣的存在理由是「餘額不足的人不能先把 agent 的錢花掉」，不是最終價格；
+# 實際只收 min(上限, max(下限, 實際 USD × ARGUS_COIN_PER_USD))。
+ARGUS_COIN_REBUILD_HOLD = int(os.getenv("ARGUS_COIN_REBUILD_HOLD", "30"))
+# USD → coin 換算。依購點方案推算：1 coin ≈ NT$0.845（四個方案平均），
+# USD/NTD 以 32 計，純成本轉換約 38 coin/USD。預設 100 約為純成本的 2.6 倍，
+# 用來涵蓋 worker 運算與儲存。**這是營運參數，該由定價決定而不是照抄。**
+ARGUS_COIN_PER_USD = int(os.getenv("ARGUS_COIN_PER_USD", "100"))
+# 每次成功複刻的最低消費。沒有下限的話，agent 用免費模型時實際成本為 0、
+# 這個功能會完全不收費，但 Argus 自己的 worker 與儲存成本仍在。
+ARGUS_COIN_REBUILD_MIN = int(os.getenv("ARGUS_COIN_REBUILD_MIN", "1"))
+# 修正產出額度外的每次產生固定點數。暫定值——上線前以 rebuild 實際
+# token 成本校準（spec docs/specs/0002-fix-output.md）。
+ARGUS_COIN_FIXGEN_GENERATION = int(os.getenv("ARGUS_COIN_FIXGEN_GENERATION", "30"))
+# AI Agent 擬真使用者 UX 測試：全網站掃描且勾選 UX 維度時，於掃描費用外
+# 另收一筆固定點數（agent 會實際開瀏覽器操作、呼叫 LLM，成本與逐頁分析不同）。
+# 只在 ARGUS_AGENT_ENABLED 開啟時計收；hold 與 settle 對稱由 estimate_scan_cost 計算。
+ARGUS_COIN_AGENT_UX = int(os.getenv("ARGUS_COIN_AGENT_UX", "20"))
+
+# 專題只串綠界測試環境；預設關閉，避免缺少簽章驗證時直接入點。
+ARGUS_PAYMENT_MODE = os.getenv("ARGUS_PAYMENT_MODE", "disabled").strip().lower()
+if ARGUS_PAYMENT_MODE not in {"disabled", "ecpay_test"}:
+    raise RuntimeError("ARGUS_PAYMENT_MODE 只允許 disabled 或 ecpay_test。")
+ECPAY_MERCHANT_ID = os.getenv("ECPAY_MERCHANT_ID", "").strip()
+ECPAY_HASH_KEY = os.getenv("ECPAY_HASH_KEY", "").strip()
+ECPAY_HASH_IV = os.getenv("ECPAY_HASH_IV", "").strip()
+ECPAY_CHECKOUT_URL = os.getenv(
+    "ECPAY_CHECKOUT_URL",
+    "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5",
+).strip()
+ECPAY_RETURN_URL = os.getenv("ECPAY_RETURN_URL", "").strip()
+ECPAY_CLIENT_BACK_URL = os.getenv("ECPAY_CLIENT_BACK_URL", "").strip()
+if ARGUS_PAYMENT_MODE == "ecpay_test":
+    required_ecpay_settings = {
+        "ECPAY_MERCHANT_ID": ECPAY_MERCHANT_ID,
+        "ECPAY_HASH_KEY": ECPAY_HASH_KEY,
+        "ECPAY_HASH_IV": ECPAY_HASH_IV,
+        "ECPAY_RETURN_URL": ECPAY_RETURN_URL,
+        "ECPAY_CLIENT_BACK_URL": ECPAY_CLIENT_BACK_URL,
+    }
+    missing_ecpay_settings = [
+        name for name, value in required_ecpay_settings.items() if not value
+    ]
+    if missing_ecpay_settings:
+        raise RuntimeError(
+            "ecpay_test 缺少設定：" + ", ".join(missing_ecpay_settings)
+        )
+    if ECPAY_CHECKOUT_URL != "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5":
+        raise RuntimeError("ecpay_test 只能使用綠界 payment-stage 結帳網址。")
+    for ecpay_url_name, ecpay_url in {
+        "ECPAY_RETURN_URL": ECPAY_RETURN_URL,
+        "ECPAY_CLIENT_BACK_URL": ECPAY_CLIENT_BACK_URL,
+    }.items():
+        parsed_ecpay_url = urlparse(ecpay_url)
+        ecpay_url_host = parsed_ecpay_url.hostname or ""
+        try:
+            ecpay_url_port = parsed_ecpay_url.port
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{ecpay_url_name} 必須使用有效的 HTTPS 443 URL。"
+            ) from exc
+        try:
+            ipaddress.ip_address(ecpay_url_host)
+            ecpay_host_is_ip = True
+        except ValueError:
+            ecpay_host_is_ip = False
+        reserved_suffixes = (".invalid", ".localhost", ".local", ".test")
+        if (
+            parsed_ecpay_url.scheme != "https"
+            or not ecpay_url_host
+            or "." not in ecpay_url_host
+            or ecpay_host_is_ip
+            or ecpay_url_port not in {None, 443}
+            or parsed_ecpay_url.username is not None
+            or parsed_ecpay_url.password is not None
+            or parsed_ecpay_url.fragment
+            or ecpay_url_host.lower().endswith(reserved_suffixes)
+        ):
+            raise RuntimeError(
+                f"{ecpay_url_name} 必須使用公開合法網域的 HTTPS 443 URL。"
+            )
+
+# Email 寄送（購買收據、未來通知）
+# dev 預設用 filebased backend（信件存到 dev_emails/，每封一檔，可直接打開看內容；
+# 避開 Windows console cp950 編碼炸 emoji 的問題）。
+# production 設 DJANGO_EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+# 並提供 EMAIL_HOST_USER / EMAIL_HOST_PASSWORD（Gmail 用 App Password，不是登入密碼）
+EMAIL_BACKEND = os.getenv(
+    "DJANGO_EMAIL_BACKEND",
+    "django.core.mail.backends.filebased.EmailBackend",
+)
+EMAIL_FILE_PATH = os.getenv(
+    "EMAIL_FILE_PATH",
+    str(PROJECT_ROOT / "backend" / "dev_emails"),
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", default=True)
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "Argus 系統 <no-reply@argus.local>")
+
+# Django Admin 已完全移除（不再提供 `/django-admin/` 後門）；唯一後台為 React `/admin/*`
+# （admin_api 提供 CRUD endpoint）。`django.contrib.admin` 仍留在 INSTALLED_APPS：
+# 提供 LogEntry 等基礎設施並避免動到既有 migration，但已無對外 URL、無法存取。
+# 舊 jazzmin 設定常數已於 W4 移除（套件已 uv remove）
+
+
+# ---------------------------------------------------------------- OpenAPI
+# schema 只用來產生前端型別，不對外公開端點（下方 SERVE_* 全關）。
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Argus API",
+    "DESCRIPTION": "Argus 網站診斷平台的內部 API；此 schema 僅供前端產生 TypeScript 型別。",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    # 不註冊 /api/schema/ 之類的對外路由——schema 以 manage.py spectacular 離線產生
+    "SERVE_PUBLIC": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    # 回應欄位一律必填（原因見 config/spectacular_hooks.py）；第一個是套件預設的 hook，要保留
+    "POSTPROCESSING_HOOKS": [
+        "drf_spectacular.hooks.postprocess_schema_enums",
+        "config.spectacular_hooks.mark_response_fields_required",
+    ],
+    "SCHEMA_PATH_PREFIX": "/api",
+}

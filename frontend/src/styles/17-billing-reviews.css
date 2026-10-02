@@ -1,0 +1,467 @@
+@layer components {
+  
+  
+  
+  
+  
+  
+  
+  
+
+  /* ── 頁框 ── */
+  .billing-page{
+    display: grid;
+    gap: 1.5rem;
+    width: 100%;
+    max-width: 1320px;
+    margin: 0 auto;
+  }
+
+  .billing-checkout{
+    overflow: clip;
+    padding: 0;
+  }
+
+  .billing-checkout-header{
+    position: relative;
+    isolation: isolate;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding: 1.6rem 1.75rem;
+    border-bottom: 1px solid var(--ag-border);
+    background-color: var(--ag-bg-raised);
+    background-image:
+      linear-gradient(var(--ag-grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--ag-grid-line) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+  .billing-checkout-header::before{
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: var(--ag-hero-wash);
+    pointer-events: none;
+  }
+
+  .billing-checkout-heading{ display: grid; min-width: 0; gap: 0.45rem; }
+
+  .billing-checkout-eyebrow{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    color: var(--ag-primary);
+    font-family: var(--ag-font-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+  }
+  .billing-checkout-eyebrow::before{
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 3px var(--ag-primary-soft-2);
+  }
+
+  .billing-checkout-title{
+    margin: 0;
+    color: var(--ag-text);
+    font-size: clamp(1.45rem, 2.4vw, 1.9rem);
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  .billing-checkout-subtitle{
+    max-width: 46rem;
+    margin: 0;
+    color: var(--ag-text-2);
+    font-size: 0.9rem;
+    line-height: 1.7;
+  }
+
+  .billing-wallet-summary{
+    display: grid;
+    flex: 0 0 auto;
+    grid-template-columns: auto auto;
+    align-items: baseline;
+    gap: 0.15rem 0.45rem;
+    min-width: 10rem;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid var(--ag-border-strong);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-surface-glass);
+    box-shadow: var(--ag-shadow-1);
+    backdrop-filter: blur(10px);
+  }
+  .billing-wallet-summary span:first-child{
+    grid-column: 1 / -1;
+    color: var(--ag-text-3);
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .billing-wallet-summary strong{
+    color: var(--ag-text);
+    font-family: var(--ag-font-display);
+    font-size: 1.55rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .billing-wallet-summary span:last-child{
+    color: var(--ag-accent);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  /* 環境提示：測試模式（琥珀）／暫停（中性） */
+  .billing-environment-notice{
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 1.25rem 1.75rem 0;
+    padding: 0.8rem 1rem;
+    border: 1px solid;
+    border-radius: var(--ag-r-md);
+    font-size: 0.84rem;
+    line-height: 1.6;
+  }
+  .billing-environment-notice.tone-test{
+    border-color: color-mix(in srgb, var(--ag-warn) 38%, transparent);
+    background: var(--ag-warn-soft);
+    color: var(--ag-text);
+  }
+  .billing-environment-notice.tone-test .billing-environment-chip{ color: var(--ag-warn); }
+  .billing-environment-notice.tone-paused{
+    border-color: var(--ag-border-strong);
+    background: var(--ag-surface-2);
+    color: var(--ag-text-2);
+  }
+  .billing-environment-notice strong{ color: var(--ag-text); font-weight: 700; }
+  .billing-environment-chip{
+    flex: 0 0 auto;
+    padding: 0.2rem 0.55rem;
+    border: 1px solid currentColor;
+    border-radius: var(--ag-r-pill);
+    font-family: var(--ag-font-mono);
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+
+  .billing-step-content{ padding: 1.25rem 1.75rem 1.75rem; }
+
+  /* ── 方案卡 ── */
+  .billing-plan-grid{
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1rem;
+    padding-top: 1rem;
+  }
+  .billing-sub-grid{
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+    padding-top: 0.75rem;
+  }
+
+  .billing-plan-card{
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 1.5rem 1.25rem 1.25rem;
+    border: 1px solid var(--ag-border);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-bg-raised);
+    color: var(--ag-text);
+    transition: transform var(--ag-dur-2) var(--ag-ease), border-color var(--ag-dur-2), box-shadow var(--ag-dur-2);
+  }
+  .billing-plan-card:hover{
+    transform: translateY(-3px);
+    border-color: var(--ag-border-accent);
+    box-shadow: var(--ag-shadow-2);
+  }
+  .billing-plan-card.is-recommended{
+    border-color: color-mix(in srgb, var(--ag-accent) 60%, transparent);
+    background:
+      linear-gradient(180deg, var(--ag-accent-soft), transparent 55%),
+      var(--ag-bg-raised);
+    box-shadow: var(--ag-glow-signal);
+  }
+  .billing-plan-badge{
+    position: absolute;
+    top: 0.9rem;
+    right: 0.9rem;
+    padding: 0.12rem 0.55rem;
+    border-radius: var(--ag-r-pill);
+    background: var(--ag-bad-soft);
+    color: var(--ag-bad);
+    font-size: 0.7rem;
+    font-weight: 700;
+  }
+  .billing-plan-recommend{
+    position: absolute;
+    top: -0.8rem;
+    left: 50%;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.2rem 0.7rem;
+    border-radius: var(--ag-r-pill);
+    background: var(--ag-accent);
+    color: var(--ag-on-accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+    white-space: nowrap;
+    transform: translateX(-50%);
+    box-shadow: var(--ag-shadow-1);
+  }
+  .billing-plan-recommend svg{ width: 13px; height: 13px; }
+  .billing-plan-recommend .ln-fill{ fill: currentColor; fill-opacity: 1; }
+  .billing-plan-name{ margin: 0; color: var(--ag-text); font-size: 1.05rem; font-weight: 700; }
+  .billing-plan-coin{
+    margin: 0.25rem 0 0;
+    color: var(--ag-text);
+    font-family: var(--ag-font-display);
+    font-size: 2rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .billing-plan-card.is-recommended .billing-plan-coin{ color: var(--ag-accent); }
+  .billing-plan-coin span{ color: var(--ag-text-3); font-size: 0.85rem; font-weight: 600; }
+  .billing-plan-price{
+    margin: 0;
+    color: var(--ag-text);
+    font-family: var(--ag-font-display);
+    font-size: 1.2rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .billing-plan-rate{ margin: 0; color: var(--ag-text-3); font-family: var(--ag-font-mono); font-size: 0.72rem; }
+  .billing-plan-desc{ margin: 0.25rem 0 0; color: var(--ag-text-2); font-size: 0.84rem; line-height: 1.6; }
+  .billing-plan-button{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    margin-top: auto;
+    padding: 0 1rem;
+    border: 1px solid var(--ag-border-strong);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-surface-2);
+    color: var(--ag-text);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--ag-dur-2) var(--ag-ease), border-color var(--ag-dur-2), color var(--ag-dur-2);
+  }
+  .billing-plan-button:hover:not(:disabled){
+    border-color: var(--ag-primary);
+    background: var(--ag-primary-soft);
+  }
+  .billing-plan-card.is-recommended .billing-plan-button:not(:disabled){
+    border-color: transparent;
+    background: var(--ag-primary);
+    color: var(--ag-on-primary);
+  }
+  .billing-plan-card.is-recommended .billing-plan-button:hover:not(:disabled){ background: var(--ag-primary-hover); }
+  .billing-plan-button:disabled{ cursor: not-allowed; opacity: 0.55; }
+
+  .billing-plan-features{ display: grid; gap: 0.35rem; margin: 0.4rem 0 0.75rem; padding: 0; list-style: none; }
+  .billing-plan-features li{
+    position: relative;
+    padding-left: 1.1rem;
+    color: var(--ag-text-2);
+    font-size: 0.82rem;
+    line-height: 1.5;
+  }
+  .billing-plan-features li::before{
+    content: "";
+    position: absolute;
+    top: 0.5em;
+    left: 0;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: var(--ag-primary);
+    box-shadow: 0 0 0 3px var(--ag-primary-soft);
+  }
+
+  /* ── 回饋訊息 ── */
+  .billing-feedback{
+    padding: 0.75rem 1rem;
+    border: 1px solid;
+    border-radius: var(--ag-r-md);
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+  .billing-feedback.tone-good{
+    border-color: color-mix(in srgb, var(--ag-good) 35%, transparent);
+    background: var(--ag-good-soft);
+    color: var(--ag-good);
+  }
+  .billing-feedback.tone-bad{
+    border-color: color-mix(in srgb, var(--ag-bad) 35%, transparent);
+    background: var(--ag-bad-soft);
+    color: var(--ag-bad);
+  }
+
+  /* ── 訂閱狀態 ── */
+  .billing-sub-body{ display: grid; gap: 1.25rem; }
+
+  .billing-sub-status{
+    display: grid;
+    gap: 1rem;
+    padding: 1.25rem;
+    border: 1px solid var(--ag-border-accent);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-primary-soft);
+  }
+  .billing-sub-status-head{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+  .billing-sub-status-name{ margin: 0; color: var(--ag-text); font-size: 1.15rem; font-weight: 700; }
+  .billing-sub-status-badge{
+    --st: var(--ag-text-3);
+    padding: 0.15rem 0.6rem;
+    border-radius: var(--ag-r-pill);
+    background: color-mix(in srgb, var(--st) 14%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--st) 35%, transparent);
+    color: var(--st);
+    font-size: 0.74rem;
+    font-weight: 700;
+  }
+  .billing-sub-status-badge.tone-good{ --st: var(--ag-good); }
+  .billing-sub-status-badge.tone-warn{ --st: var(--ag-warn); }
+  .billing-sub-status-badge.tone-neutral{ --st: var(--ag-text-2); }
+
+  .billing-sub-dl{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.75rem 1.25rem;
+    margin: 0;
+  }
+  .billing-sub-dl div{ display: grid; gap: 0.15rem; }
+  .billing-sub-dl dt{ color: var(--ag-text-3); font-size: 0.75rem; font-weight: 600; }
+  .billing-sub-dl dd{ margin: 0; color: var(--ag-text); font-size: 0.95rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .billing-sub-actions{ display: flex; align-items: center; gap: 0.75rem; }
+  .billing-sub-cancel-btn{
+    min-height: 42px;
+    padding: 0 1.1rem;
+    border: 1px solid color-mix(in srgb, var(--ag-bad) 50%, transparent);
+    border-radius: var(--ag-r-md);
+    background: transparent;
+    color: var(--ag-bad);
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--ag-dur-2);
+  }
+  .billing-sub-cancel-btn:hover:not(:disabled){ background: var(--ag-bad-soft); }
+  .billing-sub-cancel-btn:disabled{ cursor: not-allowed; opacity: 0.6; }
+  .billing-sub-renew-hint{ margin: 0; color: var(--ag-text-2); font-size: 0.85rem; }
+
+  /* ── 購買資料表單 ── */
+  .billing-field-grid{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+
+  .billing-form-section{
+    min-width: 0;
+    margin: 0;
+    padding: 1.15rem 1.2rem 1.25rem;
+    border: 1px solid var(--ag-border);
+    border-radius: var(--ag-r-lg);
+    background: var(--ag-bg-raised);
+  }
+  .billing-form-legend{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0 0.35rem;
+    color: var(--ag-text);
+    font-size: 0.98rem;
+    font-weight: 700;
+  }
+  .billing-form-index{
+    display: inline-grid;
+    place-items: center;
+    width: 1.7rem;
+    height: 1.7rem;
+    border-radius: var(--ag-r-sm);
+    background: var(--ag-primary-soft-2);
+    color: var(--ag-primary);
+    font-family: var(--ag-font-display);
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+  .billing-form-description{ margin: 0.2rem 0 1rem; color: var(--ag-text-3); font-size: 0.8rem; line-height: 1.6; }
+
+  .billing-choice-grid{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+  .billing-carrier-grid{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.65rem; }
+
+  .billing-choice-card{
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    min-height: 4.4rem;
+    padding: 0.9rem;
+    border: 1px solid var(--ag-border-strong);
+    border-radius: var(--ag-r-md);
+    background: var(--ag-surface);
+    color: var(--ag-text-2);
+    cursor: pointer;
+    transition: border-color var(--ag-dur-2) var(--ag-ease), background var(--ag-dur-2), box-shadow var(--ag-dur-2);
+  }
+  .billing-choice-card:hover{ border-color: var(--ag-border-accent); }
+  .billing-choice-card:has(input:checked){
+    border-color: var(--ag-primary);
+    background: var(--ag-primary-soft);
+    color: var(--ag-text);
+    box-shadow: inset 0 0 0 1px var(--ag-primary);
+  }
+  .billing-choice-card:focus-within{ outline: 2px solid var(--ag-primary); outline-offset: 2px; }
+  .billing-choice-card input[type="radio"]{
+    flex: 0 0 auto;
+    width: 1.1rem;
+    height: 1.1rem;
+    margin-top: 0.15rem;
+    accent-color: var(--ag-primary);
+  }
+  .billing-choice-card.is-compact{ min-height: 4.1rem; padding: 0.8rem; }
+  .billing-choice-copy{ display: flex; min-width: 0; flex-direction: column; gap: 0.2rem; }
+  .billing-choice-copy strong{ color: var(--ag-text); font-size: 0.88rem; line-height: 1.35; }
+  .billing-choice-copy small{ color: var(--ag-text-3); font-size: 0.74rem; line-height: 1.45; }
+
+  .billing-form-subsection{ margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--ag-border); }
+  .billing-subsection-heading{ margin-bottom: 0.65rem; color: var(--ag-text-2); font-size: 0.8rem; font-weight: 700; }
+  .billing-conditional-field{ max-width: 26rem; margin-top: 0.9rem; }
+  .billing-company-section{ padding-left: 0; }
+
+  .billing-checkout .input{ min-height: 46px; }
+  .billing-checkout .input.is-error{ border-color: var(--ag-bad); box-shadow: 0 0 0 3px var(--ag-bad-soft); }
+
+  /* ── 響應式 ── */
+  @media (max-width: 1200px) {
+    .billing-plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 900px) {
+    .billing-sub-grid,
+    .billing-carrier-grid{ grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 640px) {
+    .billing-plan-grid,
+    .billing-field-grid,
+    .billing-choice-grid{ grid-template-columns: minmax(0, 1fr); }
+    .billing-checkout-header{ flex-direction: column; align-items: stretch; padding: 1.25rem 1rem; }
+    .billing-wallet-summary{ width: 100%; }
+    .billing-environment-notice{ flex-direction: column; align-items: flex-start; margin: 1rem 1rem 0; }
+    .billing-step-content{ padding: 1rem; }
+    .billing-form-section{ padding: 1rem; }
+    .billing-plan-button{ width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .billing-plan-card:hover{ transform: none; }
+  }
+}

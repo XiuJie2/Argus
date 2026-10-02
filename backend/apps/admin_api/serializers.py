@@ -1,0 +1,344 @@
+from drf_spectacular.utils import extend_schema_field
+from rest_framework import serializers
+
+from apps.accounts.models import LoginEvent
+from apps.admin_api.models import AdminAuditLog, Announcement
+from apps.billing.models import (
+    CoinTransaction,
+    CoinWallet,
+    PurchaseOrder,
+    SubscriptionPlan,
+    UserSubscription,
+)
+from apps.reviews.models import PlatformReview, ReviewResponse
+from apps.scans.models import ScanJob, VerifiedDomain
+
+
+class AdminUserListSerializer(serializers.Serializer):
+    """使用者列表精簡欄位（不暴露 password / permissions）。"""
+
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    email = serializers.CharField()
+    full_name = serializers.SerializerMethodField()
+    date_joined = serializers.DateTimeField()
+    last_login = serializers.DateTimeField(allow_null=True)
+    is_staff = serializers.BooleanField()
+    balance = serializers.SerializerMethodField()
+    total_purchased_ntd = serializers.SerializerMethodField()
+    total_scans_used = serializers.SerializerMethodField()
+
+    def get_full_name(self, obj) -> str:
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.username
+
+    def get_balance(self, obj) -> int:
+        w = getattr(obj, "coin_wallet", None)
+        return w.balance if w else 0
+
+    def get_total_purchased_ntd(self, obj) -> int:
+        w = getattr(obj, "coin_wallet", None)
+        return w.total_purchased_ntd if w else 0
+
+    def get_total_scans_used(self, obj) -> int:
+        w = getattr(obj, "coin_wallet", None)
+        return w.total_scans_used if w else 0
+
+
+class AdminCoinTransactionSerializer(serializers.ModelSerializer):
+    kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+    scan_origin = serializers.SerializerMethodField()
+    plan_name = serializers.CharField(
+        source="plan.name", read_only=True, allow_null=True, default=None,
+    )
+    admin_actor_username = serializers.CharField(
+        source="admin_actor.username", read_only=True, allow_null=True, default=None,
+    )
+
+    class Meta:
+        model = CoinTransaction
+        fields = [
+            "id", "amount", "kind", "kind_label", "balance_after",
+            "scan_job", "scan_origin", "plan", "plan_name",
+            "admin_actor_username", "note", "created_at",
+        ]
+
+    def get_scan_origin(self, obj) -> str | None:
+        return obj.scan_job.origin if obj.scan_job_id else None
+
+
+class AdminWalletSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CoinWallet
+        fields = [
+            "balance", "total_purchased_ntd", "total_scans_used",
+            "last_bonus_year", "last_bonus_month",
+        ]
+
+
+class AdminUserDetailSerializer(AdminUserListSerializer):
+    """使用者詳情：基本資料 + wallet + 最近 30 筆交易。"""
+
+    wallet = serializers.SerializerMethodField()
+    recent_transactions = serializers.SerializerMethodField()
+    is_active = serializers.BooleanField()
+    is_superuser = serializers.BooleanField()
+
+    @extend_schema_field(AdminWalletSummarySerializer(allow_null=True))
+    def get_wallet(self, obj):
+        w = getattr(obj, "coin_wallet", None)
+        if not w:
+            return None
+        return AdminWalletSummarySerializer(w).data
+
+    @extend_schema_field(AdminCoinTransactionSerializer(many=True))
+    def get_recent_transactions(self, obj):
+        w = getattr(obj, "coin_wallet", None)
+        if not w:
+            return []
+        qs = w.transactions.all()[:30]
+        return AdminCoinTransactionSerializer(qs, many=True).data
+
+
+class AdjustCoinSerializer(serializers.Serializer):
+    delta = serializers.IntegerField()
+    note = serializers.CharField(max_length=255, allow_blank=True, required=False)
+
+    def validate_delta(self, value: int) -> int:
+        if value == 0:
+            raise serializers.ValidationError("delta 不可為 0。")
+        return value
+
+
+class AdminReviewOfficialResponseSerializer(serializers.Serializer):
+    """評論的官方回覆（AdminReviewSerializer.get_response 的輸出結構）。"""
+
+    body = serializers.CharField()
+    created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField()
+    author_username = serializers.CharField(allow_null=True)
+
+
+class AdminReviewSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source="user.username", read_only=True)
+    full_name = serializers.SerializerMethodField()
+    response = serializers.SerializerMethodField()
+    report_count = serializers.IntegerField(source="report_count_annotated", read_only=True)
+    pending_report_count = serializers.IntegerField(
+        source="pending_report_count_annotated",
+        read_only=True,
+    )
+    response_report_count = serializers.IntegerField(
+        source="response_report_count_annotated",
+        read_only=True,
+    )
+    response_pending_report_count = serializers.IntegerField(
+        source="response_pending_report_count_annotated",
+        read_only=True,
+    )
+    is_pending = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = PlatformReview
+        fields = [
+            "id", "username", "full_name",
+            "rating", "title", "comment", "show_partial_email", "status",
+            "response", "report_count", "pending_report_count",
+            "response_report_count", "response_pending_report_count", "is_pending",
+            "created_at", "updated_at",
+        ]
+
+    def get_full_name(self, obj) -> str:
+        u = obj.user
+        return f"{u.first_name} {u.last_name}".strip() or u.username
+
+    @extend_schema_field(AdminReviewOfficialResponseSerializer(allow_null=True))
+    def get_response(self, obj):
+        try:
+            response = obj.official_response
+        except ReviewResponse.DoesNotExist:
+            return None
+        return {
+            "body": response.body,
+            "created_at": response.created_at,
+            "updated_at": response.updated_at,
+            "author_username": response.author.username if response.author_id else None,
+        }
+
+
+class AdminReplyReviewSerializer(serializers.Serializer):
+    reply = serializers.CharField(max_length=2000, allow_blank=False, trim_whitespace=True)
+
+
+class AdminModerateReviewSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=PlatformReview.Status.choices)
+
+
+class AdminScanJobSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source="user.username", read_only=True)
+    findings_count = serializers.IntegerField(read_only=True)
+    pages_count = serializers.IntegerField(read_only=True)
+    duration_sec = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ScanJob
+        fields = [
+            # user_id 供後台從掃描直接跳到使用者詳情（調整點數在那裡）
+            "id", "user_id", "username", "origin",
+            "status", "scan_mode",
+            "overall_score", "pages_count", "findings_count",
+            "max_pages", "duration_sec",
+            "created_at", "completed_at",
+        ]
+
+    def get_duration_sec(self, obj) -> int | None:
+        if obj.started_at and obj.completed_at:
+            return int((obj.completed_at - obj.started_at).total_seconds())
+        return None
+
+
+class AdminAuditLogSerializer(serializers.ModelSerializer):
+    actor_username = serializers.CharField(
+        source="admin_actor.username", read_only=True, allow_null=True, default=None,
+    )
+    target_username = serializers.CharField(
+        source="target_user.username", read_only=True, allow_null=True, default=None,
+    )
+    action_label = serializers.CharField(source="get_action_display", read_only=True)
+
+    class Meta:
+        model = AdminAuditLog
+        fields = [
+            "id", "created_at",
+            "action", "action_label",
+            "actor_username",
+            "target_username",
+            "target_object_repr",
+            "payload",
+        ]
+
+
+class AdminPurchaseOrderSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source="user.username", read_only=True)
+    plan_name = serializers.CharField(source="plan.name", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    invoice_type_label = serializers.CharField(
+        source="get_invoice_type_display", read_only=True,
+    )
+
+    class Meta:
+        model = PurchaseOrder
+        fields = [
+            "id", "created_at", "paid_at",
+            "username", "plan_name",
+            "price_ntd", "coin_amount",
+            "buyer_name", "buyer_email",
+            "invoice_type", "invoice_type_label",
+            "company_name", "tax_id",
+            "status", "status_label",
+        ]
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Announcement
+        fields = [
+            "id", "title", "content", "type",
+            "active_days", "is_active", "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+
+class AdminLoginEventSerializer(serializers.ModelSerializer):
+    """使用者登入事件（whitelist：method/ip/user_agent/created_at）。"""
+
+    method_label = serializers.CharField(source="get_method_display", read_only=True)
+
+    class Meta:
+        model = LoginEvent
+        fields = ["method", "method_label", "ip_address", "user_agent", "created_at"]
+
+
+class AdminSubscriptionPlanSerializer(serializers.ModelSerializer):
+    """後台訂閱方案清單（本 wave 唯讀，不做方案 CRUD）。"""
+
+    class Meta:
+        model = SubscriptionPlan
+        fields = [
+            "id", "code", "name",
+            "monthly_price_ntd", "monthly_coins",
+            "features", "badge", "sort_order", "is_active",
+            "created_at", "updated_at",
+        ]
+
+
+class AdminUserSubscriptionSerializer(serializers.ModelSerializer):
+    """指定使用者的訂閱狀態（whitelist）。"""
+
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    plan_code = serializers.CharField(source="plan.code", read_only=True)
+    plan_name = serializers.CharField(source="plan.name", read_only=True)
+
+    class Meta:
+        model = UserSubscription
+        fields = [
+            "status", "status_label",
+            "plan_code", "plan_name",
+            "periods_remaining",
+            "started_at", "current_period_end", "cancelled_at",
+            "created_at", "updated_at",
+        ]
+
+
+class AdminSubscriptionActionSerializer(serializers.Serializer):
+    """後台調整訂閱：action=grant 需 plan_code（periods 預設 1）；cancel 不需。"""
+
+    ACTION_GRANT = "grant"
+    ACTION_CANCEL = "cancel"
+
+    action = serializers.ChoiceField(choices=[ACTION_GRANT, ACTION_CANCEL])
+    plan_code = serializers.SlugField(required=False, allow_blank=False)
+    periods = serializers.IntegerField(min_value=1, max_value=36, default=1)
+
+    def validate(self, attrs: dict) -> dict:
+        if attrs.get("action") == self.ACTION_GRANT:
+            plan_code = attrs.get("plan_code")
+            if not plan_code:
+                raise serializers.ValidationError(
+                    {"plan_code": "action=grant 必須提供 plan_code。"},
+                )
+            try:
+                self.context["plan"] = SubscriptionPlan.objects.get(code=plan_code)
+            except SubscriptionPlan.DoesNotExist as exc:
+                raise serializers.ValidationError(
+                    {"plan_code": "找不到該訂閱方案。"},
+                ) from exc
+        return attrs
+
+
+class AdminVerifiedDomainSerializer(serializers.ModelSerializer):
+    """後台網域驗證清單（whitelist：只帶 username，不輸出 email 等個資）。"""
+
+    username = serializers.CharField(source="user.username", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    method_label = serializers.CharField(source="get_method_display", read_only=True)
+    admin_actor_username = serializers.CharField(
+        source="admin_actor.username", read_only=True, allow_null=True, default=None,
+    )
+    is_effectively_verified = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = VerifiedDomain
+        fields = [
+            "id", "username", "domain",
+            "status", "status_label", "method", "method_label",
+            "verified_at", "expires_at", "last_checked_at", "last_error",
+            "admin_override", "admin_actor_username", "admin_note",
+            "is_effectively_verified", "created_at",
+        ]
+
+
+class DomainOverrideSerializer(serializers.Serializer):
+    """網域驗證人工審核：approve=True 人工核准；approve=False 否決。"""
+
+    approve = serializers.BooleanField()
+    note = serializers.CharField(max_length=255, allow_blank=True, required=False)

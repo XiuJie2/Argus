@@ -1,0 +1,22 @@
+@layer components {
+  /* ========================================
+     掃描列表卡片的進行中光帶。只用 --ag-* token。
+     ======================================== */
+
+  /* ── 掃描列表卡片：進行中的流動光帶 ── */
+  .scan-card-progress-shimmer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 3px;
+    pointer-events: none;
+    background: linear-gradient(180deg, transparent, var(--ag-primary), transparent);
+    animation: card-shimmer 1.6s var(--ag-ease) infinite;
+  }
+  @keyframes card-shimmer {
+    0% { transform: translateY(-60%); opacity: 0; }
+    30%, 70% { opacity: 1; }
+    100% { transform: translateY(60%); opacity: 0; }
+  }
+}

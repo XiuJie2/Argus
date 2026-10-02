@@ -1,0 +1,151 @@
+# Argus production 基線：Gunicorn web / worker / redis / db / nginx(frontend)
+# 本機展示需疊加 docker-compose.dev.yml；正式環境只用本檔。
+# 所有依賴都在 image 與 volume 內，不會污染主機環境
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?請在 .env 設定 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?請在 .env 設定 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?請在 .env 設定 POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DJANGO_DEBUG: "false"
+      DATABASE_URL: postgres://${POSTGRES_USER:?請在 .env 設定 POSTGRES_USER}:${POSTGRES_PASSWORD:?請在 .env 設定 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:?請在 .env 設定 POSTGRES_DB}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uv run python manage.py migrate --noinput
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DJANGO_DEBUG: "false"
+      DATABASE_URL: postgres://${POSTGRES_USER:?請在 .env 設定 POSTGRES_USER}:${POSTGRES_PASSWORD:?請在 .env 設定 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:?請在 .env 設定 POSTGRES_DB}
+      TRUST_PROXY_SSL_HEADER: "true"
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+      ARGUS_EGRESS_PROXY_URL: ${ARGUS_EGRESS_PROXY_URL:-}
+      # 主網址:巧.tw (xn--gst.tw) / 備援:argus6.qzz.io
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,web,frontend,xn--gst.tw,www.xn--gst.tw,argus6.qzz.io,ars.clouda.dpdns.org"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "false"
+      ARGUS_AUTO_QUEUE_SCANS: "true"
+      CORS_ALLOWED_ORIGINS: "http://localhost,http://localhost:80,http://127.0.0.1,https://xn--gst.tw,https://www.xn--gst.tw,https://argus6.qzz.io,http://argus6.qzz.io,https://ars.clouda.dpdns.org"
+      CSRF_TRUSTED_ORIGINS: "https://xn--gst.tw,https://www.xn--gst.tw,https://argus6.qzz.io,http://argus6.qzz.io,https://ars.clouda.dpdns.org"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    volumes:
+      - media_data:/app/backend/media
+    healthcheck:
+      test: ["CMD", "uv", "run", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DJANGO_DEBUG: "false"
+      DATABASE_URL: postgres://${POSTGRES_USER:?請在 .env 設定 POSTGRES_USER}:${POSTGRES_PASSWORD:?請在 .env 設定 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:?請在 .env 設定 POSTGRES_DB}
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      ARGUS_EGRESS_PROXY_URL: ${ARGUS_EGRESS_PROXY_URL:-}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "false"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    command: uv run celery -A config worker -l info
+    volumes:
+      - media_data:/app/backend/media
+    healthcheck:
+      test: ["CMD-SHELL", "uv run celery -A config inspect ping -d celery@$$HOSTNAME --timeout=5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Phase 3 攻擊平台：Kali container，提供 sqlmap / metasploit 等主動驗證工具。
+  # 預設不啟動，僅在明確授權的展示環境用 `docker compose --profile attack up -d kali` 啟動。
+  # container_name 必須對齊 settings.ARGUS_KALI_CONTAINER（預設 argus-kali-1）。
+  #
+  # ⚠ 完整攻擊鏈（worker 透過 docker exec 呼叫本服務）尚需兩項手動 infra 設定，請勿略過：
+  #   1. worker image 安裝 docker CLI
+  #   2. worker service 掛載宿主 docker socket（- /var/run/docker.sock:/var/run/docker.sock）
+  #   這兩項屬主機層權限變更，須在授權的隔離展示環境手動套用，未在此預設開啟。
+  kali:
+    image: kalilinux/kali-rolling
+    container_name: argus-kali-1
+    profiles:
+      - attack
+    command: >
+      bash -c "apt-get update -q &&
+               apt-get install -y -q sqlmap metasploit-framework nmap &&
+               sleep infinity"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 從專案根 .env 讀（docker compose 預設會載入），讓 Vite build 時帶入
+        GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+    ports:
+      # 主機 8081 → container 80（避開 aiglasses 與其他可能佔 80 的服務）
+      - "8081:80"
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  media_data:

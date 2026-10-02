@@ -1,0 +1,194 @@
+/* ========================================
+   App shell：主內容容器與登入後導覽列右側的動作區（NavActions：點數、帳號選單）。
+   導覽列本體與公開頁共用 SiteNav（.public-nav，樣式在 21-public／35-public-legacy）。
+   全部走 --ag-* token，日／夜主題自動切換。
+   ======================================== */
+
+.argus-app {
+  @apply min-h-screen;
+  background: var(--ag-bg);
+  color: var(--ag-text);
+}
+
+.argus-main {
+  @apply w-full p-4 md:p-8;
+}
+
+.argus-main.with-nav {
+  @apply pt-6;
+}
+
+/* ── 導覽列右側動作區 ── */
+.app-nav-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+/* 共用：圓形圖示按鈕（漢堡、主題切換、關閉） */
+.app-theme-toggle {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-md);
+  background: var(--ag-surface);
+  color: var(--ag-text-2);
+  cursor: pointer;
+  transition: color var(--ag-dur-2) var(--ag-ease), border-color var(--ag-dur-2), background var(--ag-dur-2);
+}
+.app-theme-toggle svg { width: 19px; height: 19px; }
+.app-theme-toggle:hover {
+  color: var(--ag-text);
+  border-color: var(--ag-border-accent);
+  background: var(--ag-primary-soft);
+}
+.app-theme-toggle:hover svg { color: var(--ag-accent); }
+
+/* coin 餘額：琥珀點綴（洞察／價值），一個畫面唯一的琥珀元件 */
+.app-coin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 40px;
+  padding: 0 0.85rem 0 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--ag-accent) 38%, transparent);
+  border-radius: var(--ag-r-pill);
+  background: var(--ag-accent-soft);
+  color: var(--ag-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--ag-dur-2) var(--ag-ease), box-shadow var(--ag-dur-2), transform var(--ag-dur-1);
+}
+.app-coin-chip:hover {
+  border-color: var(--ag-accent);
+  box-shadow: var(--ag-glow-signal);
+}
+.app-coin-chip-icon { width: 18px; height: 18px; color: var(--ag-accent); }
+.app-coin-chip-icon .ln-fill { fill: currentColor; fill-opacity: 0.3; }
+.app-coin-chip-unit { font-size: 0.72rem; color: var(--ag-text-2); font-weight: 500; }
+
+.app-install-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 40px;
+  padding: 0 0.8rem;
+  border: 1px dashed var(--ag-border-accent);
+  border-radius: var(--ag-r-pill);
+  background: transparent;
+  color: var(--ag-primary);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.app-install-chip svg { width: 16px; height: 16px; }
+.app-install-chip:hover { background: var(--ag-primary-soft); }
+
+/* 帳號頭像 + 下拉選單 */
+.app-account { position: relative; }
+.app-account-trigger {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+.app-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--ag-primary-soft-2);
+  color: var(--ag-primary);
+  box-shadow: inset 0 0 0 1px var(--ag-border-accent);
+  font-family: var(--ag-font-display);
+  font-weight: 700;
+  font-size: 0.9rem;
+  transition: box-shadow var(--ag-dur-2) var(--ag-ease);
+}
+.app-avatar.is-lg { width: 42px; height: 42px; font-size: 1.05rem; }
+.app-avatar.is-xl { width: 64px; height: 64px; font-size: 1.5rem; }
+.app-avatar { overflow: hidden; }
+.app-avatar-img { width: 100%; height: 100%; object-fit: cover; }
+.app-account-trigger:hover .app-avatar,
+.app-account-trigger[aria-expanded="true"] .app-avatar { box-shadow: var(--ag-glow); }
+
+.app-account-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 10px);
+  z-index: 70;
+  width: 264px;
+  padding: 0.4rem;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-lg);
+  background: var(--ag-bg-raised);
+  box-shadow: var(--ag-shadow-3);
+  animation: app-pop-in var(--ag-dur-2) var(--ag-ease);
+  transform-origin: top right;
+}
+.app-account-head {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 0.6rem 0.8rem;
+  margin-bottom: 0.3rem;
+  border-bottom: 1px solid var(--ag-border);
+}
+.app-account-id { display: flex; min-width: 0; flex-direction: column; gap: 0.1rem; }
+.app-account-id strong { overflow: hidden; color: var(--ag-text); font-size: 0.9rem; text-overflow: ellipsis; white-space: nowrap; }
+.app-account-id small { overflow: hidden; color: var(--ag-text-3); font-family: var(--ag-font-mono); font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }
+.app-account-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 40px;
+  padding: 0 0.65rem;
+  border: 0;
+  border-radius: var(--ag-r-sm);
+  background: transparent;
+  color: var(--ag-text-2);
+  font-size: 0.875rem;
+  text-align: left;
+  cursor: pointer;
+}
+.app-account-item svg { width: 18px; height: 18px; color: var(--ag-text-3); }
+.app-account-item .ln-fill { fill: currentColor; fill-opacity: 0.18; }
+.app-account-item:hover,
+.app-account-item:focus-visible { background: var(--ag-surface-2); color: var(--ag-text); outline: none; }
+.app-account-item:focus-visible { box-shadow: inset 0 0 0 2px var(--ag-primary); }
+.app-account-item.is-danger { color: var(--ag-bad); }
+.app-account-item.is-danger svg { color: var(--ag-bad); }
+.app-account-item.is-danger:hover { background: var(--ag-bad-soft); }
+
+@keyframes app-pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── 響應式 ── */
+@media (max-width: 640px) {
+  .app-nav-actions { gap: 0.35rem; }
+  .app-coin-chip { height: 36px; padding: 0 0.6rem; }
+  .app-coin-chip-unit,
+  .app-install-chip span { display: none; }
+  .app-install-chip { width: 36px; height: 36px; padding: 0; justify-content: center; }
+  .app-theme-toggle { width: 36px; height: 36px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-account-menu { animation: none; }
+}

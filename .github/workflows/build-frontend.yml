@@ -1,0 +1,115 @@
+# 前端 image（nginx serve Vite 產物 + 反向代理 /api）
+# 觸發：push 到 main 且動到 frontend/ 時，自動 build 並推到 Docker Hub
+# 註：CI 內用 Dockerfile 的 node:20-alpine，不會踩到本機 Node v24 的 Rollup crash
+name: Build & Push Frontend Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/build-frontend.yml"
+  workflow_dispatch: {} # 允許在 Actions 頁面手動觸發
+
+# 序列化 GitOps write-back：兩個 workflow 共用同一個 group → 同時只有一個在跑，
+# queue:max 會保留排隊中的 runs，避免密集 push 時較早的 pending run 被後來者取代。
+concurrency:
+  group: argus-gitops-cd
+  queue: max
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 讓 GITHUB_TOKEN 能把 kustomization 版本 bump push 回 repo
+    steps:
+      - name: Checkout 原始碼
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # GitOps write-back 需要完整歷史才能 rebase/push
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 與 build-backend.yml 同理：image build 會做 GitOps write-back，直接決定
+      # 正式站跑什麼。frontend/** 與 k8s/** 的混合 push 一樣會走到這裡，所以
+      # manifest 契約也要在建 image 之前驗過。
+      #
+      # 這裡**刻意不跑**後端測試（ruff / test apps / 部署契約 / Kali digest）。
+      # 原則是「每個 build 擋住的是它自己 paths 能弄壞的東西」：本 workflow 只在
+      # frontend/** 變動時觸發，改不到後端程式碼，跑 813 個後端測試只是每次多花
+      # 三分鐘卻不增加任何保護。不是漏掉。
+      - name: 推送 image 前執行前端品質閘門
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          # lint：.jsx 不經型別檢查，引用不存在的名稱 build 照樣成功、到瀏覽器才炸
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: 追蹤文字檔 UTF-8 與 GitOps 排隊契約
+        run: python3 scripts/verify_repository_text.py
+
+      - uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: v1.32.2
+
+      - name: Render Kustomize manifests 並斷言網路與 admission 契約
+        run: ./scripts/verify_rendered_manifests.sh
+
+      - name: 設定 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登入 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 產生 image tag
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ vars.DOCKERHUB_USERNAME }}/argus-frontend
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build 並推送
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          # GOOGLE_OAUTH_CLIENT_ID 是 build-time 值（會被打進前端 JS bundle）。
+          # 它是公開的 OAuth client id（瀏覽器本來就看得到），故用 repo variable 即可。
+          # 未設定時為空字串，行為與 docker-compose 的 ${GOOGLE_OAUTH_CLIENT_ID:-} 一致。
+          build-args: |
+            GOOGLE_OAUTH_CLIENT_ID=${{ vars.GOOGLE_OAUTH_CLIENT_ID }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: GitOps write-back（把新 sha 寫進 k8s/kustomization.yaml）
+        run: |
+          set -e
+          SHA_TAG="sha-${GITHUB_SHA:0:7}"
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" | tar -xz -C /tmp
+          sudo mv /tmp/kustomize /usr/local/bin/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 抓 main 最新狀態 → 只重設自己這個 image 欄位 → push。
+          # concurrency 已保證不會有另一個 write-back 同時跑，故一次到位、不需重試迴圈。
+          git fetch origin main
+          git reset --hard FETCH_HEAD
+          ( cd k8s && kustomize edit set image ${{ vars.DOCKERHUB_USERNAME }}/argus-frontend=${{ vars.DOCKERHUB_USERNAME }}/argus-frontend:${SHA_TAG} )
+          git diff --quiet k8s/kustomization.yaml && { echo "image tag 未變，略過"; exit 0; }
+          git commit -am "ci(cd): argus-frontend -> ${SHA_TAG}"
+          git push origin HEAD:main

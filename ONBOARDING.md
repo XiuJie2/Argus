@@ -1,0 +1,593 @@
+# Argus 協作 Onboarding（給 Claude Code 上手）
+
+> 這份文件目的：讓**新的 Claude Code 在 5 分鐘看完、30 分鐘能 commit 第一行 code**。
+> 兩位 Claude Code（你 + 同學）會在同一個 main branch 上協作，**讀完本檔再動手**。
+
+---
+
+## 0. 60 秒總覽
+
+**Argus** 是一個授權式 AI 網站健檢 SaaS：使用者輸入網址 → 全站爬蟲 + 四維掃描（SEO/AEO/GEO/資安）+ LLM Agent 動態 UX 測試 → 產出可互動報告 + Word 文件 + 給 ChatGPT/Claude 的問題 Prompt。
+
+- **技術棧**：Django 5 + DRF + Celery + Playwright Python async + React 18 + Vite + Tailwind + Zustand
+- **資料**：SQLite（dev）/ PostgreSQL（prod）；掃描截圖預設走共享 media，評論圖片可用 `ARGUS_MEDIA_STORAGE_BACKEND` 切換至 S3-compatible storage
+- **後端數百項測試**（以 `manage.py test apps` 實跑為準）、ruff、frontend build 均由 CI quality gate 驗證
+- **兩個介面層**：
+  - 前台（使用者）：網站專案工作區 `/projects /projects/:projectId/{overview,scans,issues,reports,settings}`，並保留相容入口 `/dashboard /scans /history /billing /settings`；公開頁 `/project /free-tools /purchase /download /reviews /verify /partners`
+  - React 後台：`/admin/*`（**唯一後台**；dark cyan + 淺色內容；staff 可進、`📜 操作紀錄`/`📢 公告管理` 僅 superuser）
+  - （django-admin 已於 2026-06 整併移除；管理員改走前台 email 登入）
+- **真實 PWA**：可一鍵安裝到桌面/手機主畫面
+- **已是 git repo**，最新 commit 在 `origin/main`
+
+---
+
+## 1. 必讀順序（從上到下）
+
+1. **本檔 ONBOARDING.md**
+2. `CLAUDE.md` — 行為準則（用繁體中文回覆、簡潔優先、目標導向執行、修改後測試）
+3. `Project_說明.md` — 專案規格與法律限制
+4. `開發計畫.md` — T1–T26 已完成與未完成項目
+5. `.sisyphus/argus-handoff.local.md` — 最近一次工作快照（如有）
+
+**對話開始時必做**：先 `git fetch origin` 再比對差異，**不要無腦 `git pull` / `git pull --rebase`**——本機規則只能被增量新增/更新，不可被遠端覆蓋；詳見 `CLAUDE.local.md`「git pull 保護本機規則」。
+
+---
+
+## 2. 30 分鐘上手（從 0 到能跑）
+
+### 2.1 先決條件
+- Windows（本機）或 macOS/Linux
+- Python ≥ 3.13（uv 會自動管 venv）
+- Node.js ≥ 18（dev 用；含 `npm.cmd` 在 Windows）
+- **build 專用**：Node v22 portable（候選路徑見 `docs/node22-guide.md`；系統 Node v24 在 Windows build 會 crash，build 一律走 `frontend/build-node22.ps1`）
+- `uv`（Python 套件管理；https://docs.astral.sh/uv/）
+- Docker Desktop（選用，正式部署）
+
+### 2.2 Clone 與環境
+```powershell
+git clone https://github.com/Djude1/Argus_WebsiteDiagnosticPlatform.git Argus
+cd Argus
+
+# 後端依賴
+uv sync                                     # 安裝 pyproject.toml 所有套件（含 Pillow、google-auth、python-docx）
+
+# 前端依賴
+cd frontend ; npm.cmd install ; cd ..
+
+# Playwright 瀏覽器（必須裝在專案內 .ms-playwright，禁止污染全域）
+$env:PLAYWRIGHT_BROWSERS_PATH=".ms-playwright"; uv run playwright install chromium
+```
+
+### 2.3 機密設定（**不在 repo**）
+專案根目錄需要 `.env`，內容像這樣（向專案擁有者拿）：
+```bash
+DJANGO_SECRET_KEY=請填 64-byte random
+DJANGO_DEBUG=true
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
+JWT_SECRET_KEY=請填 64-byte random
+PASSWORD_RESET_TOKEN_PEPPER=請填另一組獨立的 64-byte random
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+GOOGLE_OAUTH_CLIENT_ID=（選填；未設定時 UI 自動隱藏 Google 登入）
+ARGUS_BOOTSTRAP_SUPERUSER_USERNAME=（選填）
+ARGUS_BOOTSTRAP_SUPERUSER_PASSWORD=（選填）
+ARGUS_AGENT_ENABLED=false
+# 三個 LLM key（Phase 2 才會用，可留空先跳過）
+MINIMAX_API_KEY=
+GLM_API_KEY=
+GEMINI_API_KEY=
+# K8s Kali SQLmap 攻擊鏈（Task 1 新增；軟體已 merge 但預設完全停用，
+# 啟用須走 docs/runbooks/kubernetes-secret-at-rest-encryption.md 與
+# kali-sqlmap-rollout.md 的 Task 11 手動控制平面 gate，不可直接翻旗標）
+ARGUS_KALI_ENABLED=false
+ARGUS_KALI_BACKEND=disabled
+ARGUS_KALI_NAMESPACE=argus-kali
+ARGUS_KALI_RUNNER_IMAGE=
+ARGUS_KALI_SQLMAP_VERSION=1.10
+ARGUS_KALI_TIMEOUT=120
+ARGUS_KALI_REDIS_URL=redis://localhost:6379/0
+```
+
+**永遠不要 commit**：`.env`、`GoogleCloud_ApiKey.json`、`client_secret_*.json`（已在 `.gitignore`）。
+
+### 2.4 首次啟動
+```powershell
+# 1. 套用 migration（包含 seed PricingPlan、ProjectFeature、TeamMember、AppRelease）
+uv run python backend/manage.py migrate
+
+# 2. 建立 superuser（如 .env 沒填 bootstrap 變數，手動建）
+uv run python backend/manage.py createsuperuser
+
+# 3. Build 前端（產 frontend/dist）
+# ⚠️ 本機 Node v24 + Rollup 4 在 Windows 會 STATUS_STACK_BUFFER_OVERRUN crash，
+#    一律走 portable Node 22 helper，禁止直接 npm run build
+cd frontend ; .\build-node22.ps1 ; cd ..
+
+# 4. 啟動後端（Django 同時 serve 前端 dist）
+uv run python backend/manage.py runserver 127.0.0.1:8000
+```
+
+打開 http://127.0.0.1:8000 ：
+- 未登入 → 自動跳 `/project`（公開介紹頁）
+- 登入後 → `/projects`（所有網站；舊 `/dashboard` 保留）
+- staff 登入後右上角會看到「🛡️ 後台」chip → `/admin/overview`（superuser 多看操作紀錄/公告管理）
+- 管理員帳號以前台 email 登入即可進 `/admin`；授予 staff/superuser 用 `manage.py seed_admin`（django-admin 已移除）
+
+### 2.5 驗證一切正常
+```powershell
+uv run python backend/manage.py check
+uv run python backend/manage.py test apps        # 預期數百項全綠，以實跑數字為準
+uv run ruff check backend                         # 預期 All checks passed
+cd frontend ; .\build-node22.ps1 ; cd ..          # 預期 0 errors（禁用 npm run build，見 §13）
+```
+
+### 2.6 Docker 模式（選用）
+```powershell
+# 本機展示環境才疊加 dev override；production 只用 docker-compose.yml
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# 走 nginx 反向代理：localhost:8080 對前端、/api → web:8000
+```
+
+---
+
+## 3. 技術棧（不要建議替換）
+
+| 層級 | 套件 |
+|---|---|
+| 前端 | React 18 (Vite 6)、Tailwind CSS、Zustand、Axios、react-router-dom v7、reactflow（拓撲圖）、@react-oauth/google |
+| 後端 | Django 5 + DRF + SimpleJWT + google-auth + Pillow（圖片）+ python-docx + python-dotenv（django-admin 已整併移除，唯一後台為 React `/admin/*`） |
+| 任務 | Celery + Redis |
+| 爬蟲 | Playwright Python async（Chromium headless） |
+| DB | SQLite（dev）/ PostgreSQL（prod，via dj-database-url） |
+| AI | MiniMax / GLM（OpenAI-compatible）/ Gemini，Phase 2 用 tool calling |
+| 部署 | Docker Compose（web / worker / redis / db / nginx） |
+| K8s 攻擊鏈 | `kubernetes>=35.0,<36`（Task 4 新增，僅 K8s backend 啟用時使用；Docker demo 不需要）。**預設完全停用**（`ARGUS_KALI_ENABLED=false`、`ARGUS_KALI_BACKEND=disabled`）—軟體已 merge，正式啟用走 Task 11 手動控制平面 gate |
+| Lint | ruff（backend） |
+
+---
+
+## 4. 目錄結構
+
+```
+Argus/
+├── ONBOARDING.md           ← 本檔
+├── CLAUDE.md               ← 行為準則（繁中、簡潔、目標導向）
+├── Project_說明.md         ← 專案規格 + 法律限制
+├── 開發計畫.md             ← T1–T26 任務清單
+├── .sisyphus/
+│   └── argus-handoff.local.md    ← 最近一次工作快照（.gitignore）
+├── pyproject.toml          ← Python 依賴（uv 管）
+├── uv.lock
+├── docker-compose.yml
+├── Dockerfile              ← web/worker 共用
+│
+├── backend/
+│   ├── manage.py
+│   ├── config/             ← Django 主設定
+│   │   ├── settings.py     ← INSTALLED_APPS / ARGUS_* 常數（舊 _JAZZMIN_*_DEPRECATED 已停用）
+│   │   ├── urls.py         ← 路由總表（含 PWA re_path、SPA fallback）
+│   │   ├── celery.py
+│   │   └── asgi.py / wsgi.py
+│   └── apps/               ← 8 個 app
+│       ├── accounts/       ← User model（繼承 AbstractUser）+ Google OAuth + Email 註冊/登入 + 改密碼 + LoginEvent 登入記錄
+│       ├── scans/          ← 核心：ScanJob、Page、Finding、AgentSession、AgentStep、AuthorizationConsent、VerifiedDomain（網域所有權驗證）、crawler、scanners、reports、nuclei_scanner、cancellation、domain_verification、security/waf_scanner
+│       ├── agent/          ← Hermes-Agent：providers/tools/loop/runner/findings
+│       ├── billing/        ← CoinWallet、CoinTransaction（11 kind）、PricingPlan、PurchaseOrder、SubscriptionPlan、UserSubscription + service 唯一寫入入口（含訂閱冪等月結算）
+│       ├── reviews/        ← 已驗證 PlatformReview + 官方回覆 + 修訂/檢舉治理
+│       ├── admin_api/      ← React /admin 用的 API + AdminAuditLog model + IsSuperuser
+│       ├── content/        ← CMS：ProjectFeature、TeamMember、AppRelease
+│       └── insights/       ← 免費公開分析工具（測速 / 釣魚 URL / 釣魚郵件），AllowAny、不扣 coin
+│
+└── frontend/
+    ├── index.html          ← 含 PWA link/meta
+    ├── package.json
+    ├── vite.config.js
+    ├── tailwind.config.js
+    ├── nginx.conf          ← Docker 模式用
+    ├── Dockerfile
+    ├── public/             ← PWA assets（vite 直接複製到 dist）
+    │   ├── manifest.webmanifest
+    │   ├── service-worker.js
+    │   └── pwa-icon.svg
+    └── src/
+        ├── main.jsx        ← 進入點，註冊 SW（僅 PROD）
+        ├── App.jsx         ← 根路由 + React.lazy feature 載入
+        ├── features/       ← auth / scans / account / public / admin domain 頁面
+        ├── shared/         ← 跨 feature 共用 UI、hook、格式化
+        ├── components/     ← 可獨立理解的品牌與 domain 元件
+        ├── api.js          ← axios（含 401 攔截）
+        ├── store.js        ← Zustand：accessToken / wallet / me + fetcher
+        ├── styles.css      ← 樣式入口，只依序 @import styles/*.css
+        └── styles/         ← 35 個樣式區塊；檔名編號＝匯入順序＝覆寫優先序
+```
+
+> 前端已採 domain 分層；先在 `features/<domain>/` 定位頁面，只有新增根路由時才修改 `App.jsx`。
+
+---
+
+## 5. 8 個 App 在做什麼（一段話版）
+
+| app | 是什麼 | 關鍵檔 |
+|---|---|---|
+| `accounts` | User 模型；Email 登入/註冊、可選 Google OAuth、記憶體 access + HttpOnly refresh cookie、密碼重設；refresh 原子輪替，登出/變更密碼/重設會撤銷 token；`LoginEvent` 記錄每次登入（方法/IP/UA，admin 可查時間軸） | `views.py` `models.py` |
+| `scans` | 核心：`ScanJob`/`Page`/`Finding`/`AgentSession`/`AgentStep`/`AuthorizationConsent`/`VerifiedDomain`；Playwright BFS 爬蟲、四維 scanner、Word 報告、主動式資安 probe（**需先通過網域所有權驗證：DNS TXT/meta tag/HTML 檔三選一，90 天效期**）、WAF 阻擋偵測、合作式 cancel；worker `tasks.run_scan_job` 串接 billing 預扣/退款 | `models.py` `tasks.py` `crawler.py` `scanners.py` `views.py` `domain_verification.py` |
+| `agent` | Hermes-Agent：MiniMax-M3/GLM/Gemini provider chain + 26 工具（觀察/主動/知識庫檢索/UI 送出）+ 8 specialist 角色目錄 + observe-think-act loop + token 安全閘；架構與已知限制見 `docs/hermes-agent-architecture.md`；預設 `ARGUS_AGENT_ENABLED=false` | `providers.py` `tools.py` `loop.py` `runner.py` `knowledge/*.md` |
+| `billing` | 點數系統；`services.py` 是 wallet 唯一寫入入口。購點預設停用，可明確啟用綠界 `payment-stage`，簽章/訂單/金額驗證後才冪等入點；輕量訂閱（`SubscriptionPlan`/`UserSubscription`，月費→每月贈點，惰性冪等結算，admin 可開通/取消） | `ecpay.py` `models.py` `services.py` `views.py` |
+| `reviews` | 已驗證平台評論：完成掃描才可發表、`PlatformReview` OneToOne、本人可編修/刪除；`ReviewResponse` 單一官方回覆、`ReviewRevision` 修訂稽核、`ReviewReport` 檢舉治理 | `models.py` `views.py` |
+| `admin_api` | React /admin 用的 API；`IsAdminUser` 保護（`/me` 是 `IsAuthenticated`）；`AdminAuditLog` model + `IsSuperuser` 權限 + audit-log endpoint；service hook 自動寫 audit | `views.py` `permissions.py` `models.py` |
+| `content` | CMS：`ProjectFeature` / `TeamMember` / `AppRelease`，公開 API 給公開頁用（features/team/releases/milestones）；React /admin 的 CMS 編輯後前台秒生效 | `models.py` `views.py` `admin.py` |
+| `insights` | 免費公開分析工具：`speed_test` / `phishing_url_check` / `phishing_email_check`，全 `AllowAny`、不需登入、不扣 coin；本機特徵分類器不呼叫大模型；測速端點阻擋 localhost/內網/保留 IP 防 SSRF；供公開頁 `/free-tools` 使用 | `views.py` `analyzers.py` `urls.py` |
+
+---
+
+## 6. 路由完整地圖
+
+### 6.1 前台（無需登入也能訪問的 ★）
+| 路徑 | 元件 | 說明 |
+|---|---|---|
+| `/` | redirect | 未登入跳 `/project`、已登入跳 `/projects` |
+| `/project` ★ | `ProjectPage` | 公開介紹頁 |
+| `/free-tools` ★ | `FreeToolsPage` | 免費分析（測速 / URL 風險 / 郵件原始碼風險），呼叫 `/api/insights/*` |
+| `/purchase` ★ | `PurchasePage` | marketing + 4 方案 + FAQ，CTA 跳 `/billing` |
+| `/download` ★ | `DownloadPage` | PWA 一鍵安裝 + 三平台步驟 |
+| `/login` ★ | `LoginPage` | Email 登入 / 新帳號註冊；有 Google Client ID 時才顯示 Google OAuth |
+| `/reviews` ★ | `ReviewsPage`（`PublicLayout`） | 夜間科技評論頁；沿用公開 top bar／footer，提供星等分布／篩選、本人評論管理與評論／官方回覆的逐則按讚、檢舉 |
+| `/reviews-next` ★ | redirect | 比較階段舊網址，相容轉址到 `/reviews` |
+| `/dashboard` | `DashboardPage` | 個人總覽 |
+| `/projects` `/projects/new` | `ProjectListPage` / `NewProjectPage` | 所有網站與新增網站（不掃描、不扣點） |
+| `/projects/:projectId/{overview,scans,issues,reports,settings}` | `ProjectWorkspaceLayout` | 目前網站的總覽、掃描、問題、歷史報告與設定 |
+| `/scans` `/scans/:id` `/scans/:id/topology` | `ScanLayout` | 掃描列表/詳情/拓撲圖 |
+| `/history` | `HistoryPage` | 同網址歷次分數 |
+| `/domains` | `DomainVerifyPage` | 網域所有權驗證精靈（DNS TXT/meta/驗證檔三方法＋即時驗證；主動掃描閘門） |
+| `/billing` | `BillingPage` | 月訂閱方案面板＋3 步驟結帳 wizard |
+| `/settings` | `SettingsPage` | 錢包概覽 |
+
+### 6.2 React /admin（深色 sidebar）
+| 路徑 | 看得到 |
+|---|---|
+| `/admin/overview` | staff（含 6 stat card + 14 天 SVG mini chart + AI provider 用量 + Top 10 AI 用戶） |
+| `/admin/users` `/admin/users/:id` | staff（含調 coin 表單、訂閱開通/取消、登入記錄時間軸） |
+| `/admin/transactions` | staff |
+| `/admin/reviews` | staff（官方單一回覆、待回覆/檢舉/隱藏篩選與公開狀態治理） |
+| `/admin/scans` `/admin/scans/:id` | staff |
+| `/admin/domains` | staff（網域所有權驗證審核：搜尋/篩選/人工核准/否決含備註） |
+| `/admin/content` | staff（**3 tab inline CRUD**：特色 / 成員 / 版本） |
+| `/admin/plans` | staff（**inline CRUD** 編輯 PricingPlan） |
+| `/admin/audit-log` | **superuser** |
+
+### 6.3 ~~Django Admin~~（已於 2026-06 整併移除）
+- 原 `/django-admin/` superuser 後門已移除；**唯一後台為 React `/admin/*`**。
+- 管理員改走前台 email 登入；授予 staff/superuser 用 `manage.py seed_admin`（或 Django shell）。
+- `/django-admin/*` 現在落入 SPA fallback（回 `index.html`），不再是 Django Admin。
+
+### 6.4 PWA 必要檔（Django runserver 用 re_path 明確 serve）
+- `/manifest.webmanifest`
+- `/service-worker.js`
+- `/pwa-icon.svg`
+
+---
+
+## 7. API 端點完整列表
+
+### 7.1 認證（accounts）
+> ⚠️ 舊的 `/api/auth/dev-login/` 後門**已移除**（`apps/accounts/tests.py::test_dev_login_route_is_removed` 斷言其回 404），文件勿再列。
+
+| Method | 端點 | 權限 | request 參數 | 說明 |
+|---|---|---|---|---|
+| POST | `/api/auth/google/` | open | body：`credential` | 回 access；refresh 只寫 HttpOnly cookie |
+| POST | `/api/auth/register/` | open | body：`email`、`password`（依 Django policy，至少 10 碼） | Email 註冊，回 access + refresh cookie |
+| POST | `/api/auth/email-login/` | open | body：`email`、`password` | Email 登入，回 access + refresh cookie |
+| POST | `/api/auth/refresh/` | open + CSRF | cookie | 原子消耗舊 refresh、簽發新 cookie |
+| POST | `/api/auth/logout/` | open + CSRF | cookie | 撤銷 refresh 並清 cookie |
+| POST | `/api/auth/password-reset/request/` | open | body：`email` | 固定回應；DB 只保存 HMAC digest |
+| POST | `/api/auth/password-reset/confirm/` | open | body：`token`、`new_password` | 單次使用並撤銷所有 refresh |
+| GET | `/api/auth/me/` | auth | — | 個人資料（`id/email/username/display_name/first_name/last_name/is_staff/date_joined/last_login/auth_provider`） |
+| PATCH | `/api/auth/me/` | auth | body：`first_name?`、`last_name?` | 更新顯示名稱 |
+| POST | `/api/auth/change-password/` | auth（僅 email 帳號） | body：`old_password`、`new_password`（至少 10 碼） | 成功後撤銷 refresh 並要求重新登入；Google 帳號回 400 |
+
+### 7.2 掃描（scans）
+| Method | 端點 | 權限 | request 參數 | 說明 |
+|---|---|---|---|---|
+| GET | `/api/scans/` | auth | query：`include_history`（true 則回全部，否則同 origin 只回最新） | 列表 |
+| POST | `/api/scans/` | auth | body（`ScanJobCreateSerializer`）見下表 | 建立掃描（含 coin 預扣 `max_pages × 10`） |
+| GET | `/api/scans/{id}/` | auth | — | 詳情 |
+| GET | `/api/scans/{id}/status/` | auth | — | 狀態（含 progress） |
+| POST | `/api/scans/{id}/cancel/` | auth | 無 body | 終止（合作式 cancel，自動退款） |
+| GET | `/api/scans/{id}/topology/` | auth | — | 拓撲 nodes+edges |
+| GET | `/api/scans/{id}/report/` | auth | — | Word 報告 blob |
+| GET | `/api/scans/{id}/pages/{page_id}/screenshot/` | auth | path：`page_id` | 截圖 |
+| POST | `/api/estimate/` | auth | body：`url`、`max_pages`（1～系統上限） | 純計算掃描預扣上限（不扣點、不連線目標；完成後依實際頁數結算並退回差額） |
+| GET | `/api/pages/?scan_id=` | auth | query：`scan_id` | 頁面列表 |
+| GET | `/api/findings/?scan_id=` | auth | query：`scan_id` | findings 列表 |
+| GET | `/api/dashboard/` | auth | — | 個人總覽（含 wallet） |
+| GET/POST | `/api/projects/` | auth | POST：`name`、`canonical_url` | 列出／建立自己的網站專案；建立不扣點 |
+| GET/PATCH | `/api/projects/{uuid}/` | auth | PATCH 目前只允許名稱等非歸屬欄位 | 專案詳情／更新 |
+| POST | `/api/projects/{uuid}/archive/` | auth | — | 封存專案，保留掃描與報告 |
+| GET | `/api/history/` | auth | — | 同網址歷次 |
+| GET | `/api/audit/` | auth | — | （保留，目前前台未用） |
+| GET | `/api/findings-by-category/` | auth | — | 跨掃描分類聚合（DashboardPage 用） |
+| GET | `/api/scans/domains/` | auth | — | 我的網域驗證清單（狀態/效期/is_effectively_verified） |
+| POST | `/api/scans/domains/` | auth | body：`domain` | 新增網域→發 token＋三方法 instructions（重複 409 帶現況） |
+| POST | `/api/scans/domains/{id}/verify/` | auth | body：`method`=`dns_txt`\|`meta_tag`\|`html_file` | 執行驗證（成功→verified 90 天；失敗回 last_error） |
+| DELETE | `/api/scans/domains/{id}/` | auth | — | 刪除自己的網域（他人 404） |
+| POST | `/api/integrations/gsc/authorize/` | auth | body：`project_id` | 建立一次性 OAuth state，回 Google 授權網址 |
+| GET | `/api/integrations/gsc/callback` | open + state | Google `code`／`state` | 交換 token、取得 properties，導回專案設定頁（正式 URI 無尾斜線） |
+| GET | `/api/integrations/gsc/status/` | auth | query：`project_id` | 連線狀態、可用 properties、所選資源與同步時間 |
+| POST | `/api/integrations/gsc/property/` | auth | body：`project_id`、`site_url` | 綁定涵蓋目前 hostname 的資源；siteOwner 可驗證網域 |
+| POST | `/api/integrations/gsc/sync/` | auth | body：`project_id`、`start_date`、`end_date` | 同步最多 91 天的日維度搜尋成效 |
+| GET | `/api/integrations/gsc/metrics/` | auth | query：專案與日期區間 | 讀取 clicks／impressions／CTR／position |
+| DELETE | `/api/integrations/gsc/disconnect/` | auth | query：`project_id` | 撤銷並刪除 GSC 連線與本地指標 |
+
+**`POST /api/scans/` body 參數（`ScanJobCreateSerializer`）：**
+
+| 參數 | 型別 | 必填 | 預設 | 說明 |
+|---|---|---|---|---|
+| `url` | string（≤2048） | ✅ | — | 目標網址 |
+| `authorization_confirmed` | bool | ✅ | — | 必須為 `true`，否則 400（確認擁有網站或已取得書面授權） |
+| `scan_mode` | enum `passive`/`active` | — | `passive` | 掃描模式；**`active` 另需目標網域通過所有權驗證（見 `/api/scans/domains/`）** |
+| `active_testing_authorized` | bool | — | `false` | `scan_mode=active` 時必須為 `true` |
+| `third_party_reconfirmed` | bool | — | `false` | 網域疑似第三方/敏感產業時必須為 `true` |
+| `max_depth` | int（≥1） | — | `ARGUS_DEFAULT_MAX_DEPTH`（3） | 爬蟲深度 |
+| `max_pages` | int（1～`ARGUS_DEFAULT_MAX_PAGES`=50） | — | `50` | 最大頁數（決定預扣 coin） |
+| `respect_robots` | bool | — | `true` | 是否遵守 robots.txt |
+
+### 7.3 點數與訂單（billing）
+| Method | 端點 | 權限 | request 參數 | 說明 |
+|---|---|---|---|---|
+| GET | `/api/billing/wallet/` | auth | — | 我的錢包（餘額 + 最近 20 筆 tx + `coin_per_category`，掃描費用＝頁數 × 勾選維度數 × 此值） |
+| GET | `/api/billing/plans/` | auth | — | 4 個方案 |
+| POST | `/api/billing/purchase/` | auth | body（`PurchaseRequestSerializer`）見下表 | 結帳並入帳 coin |
+| GET | `/api/billing/orders/` | auth | — | 我的訂單 |
+| GET | `/api/billing/subscription/plans/` | open | — | 訂閱方案清單（含 payment_mode/subscribe_enabled） |
+| GET | `/api/billing/subscription/` | auth | — | 我的訂閱（無則 `subscription: null`；進場觸發冪等月結算） |
+| POST | `/api/billing/subscription/subscribe/` | auth | body：`plan_code` | 訂閱（付費模式 disabled→503；ecpay_test 模擬首月） |
+| POST | `/api/billing/subscription/cancel/` | auth | — | 取消訂閱（當期權益保留到期滿） |
+
+**`POST /api/billing/purchase/` body 參數（`PurchaseRequestSerializer`）：**
+
+| 參數 | 型別 | 必填 | 預設 | 說明 |
+|---|---|---|---|---|
+| `plan_code` | slug | ✅ | — | 方案代碼（須對應 `is_active=True` 的 PricingPlan） |
+| `buyer_name` | string（≤64） | ✅ | — | 買受人 |
+| `buyer_email` | email（≤255） | ✅ | — | 收據 email |
+| `agree_terms` | bool | ✅ | — | 必須為 `true`，否則 400 |
+| `invoice_type` | enum `personal`/`company` | — | `personal` | 發票類型 |
+| `company_name` | string（≤128） | 公司發票必填 | `""` | 公司抬頭 |
+| `tax_id` | string | 公司發票必填 | `""` | 統一編號（8 碼數字） |
+| `carrier_type` | enum `cloud`/`mobile_barcode`/`citizen_digital` | — | `cloud` | 個人發票載具（公司發票忽略） |
+| `carrier_id` | string | 視 `carrier_type` | `""` | 手機條碼：`/`+7 碼英數；自然人憑證：2 碼英文+14 碼數字 |
+
+### 7.4 評論（reviews）
+| Method | 端點 | 權限 | request 參數 | 說明 |
+|---|---|---|---|---|
+| GET | `/api/reviews/` | open | query：`sort=helpful\|newest`、`rating=1..5`、`page?` | 公開且具 `experience_at` 的評論；每頁 8 則 |
+| GET | `/api/reviews/summary/` | open | — | 公開評論總數、平均分與 1–5 星分布 |
+| GET | `/api/reviews/mine/` | auth | — | 我的評論與是否完成掃描的發表資格 |
+| POST | `/api/reviews/mine/` | auth | body：`rating`、`title?`、`comment`、`show_partial_email?` | 完成掃描的一般使用者建立評論；`show_partial_email` 預設為 `false`（完全匿名），staff 禁止發表 |
+| PATCH | `/api/reviews/mine/` | auth | 同上，可部分更新 | 編修前建立 `ReviewRevision` |
+| DELETE | `/api/reviews/mine/` | auth | — | 本人刪除自己的評論 |
+| POST | `/api/reviews/{id}/helpful/` | auth | — | 切換「有幫助」；不可操作自己的評論 |
+| POST | `/api/reviews/{id}/report/` | auth | body：`reason`、`detail?` | 檢舉他人評論 |
+
+### 7.5 公開內容 CMS
+| Method | 端點 | 權限 | 說明 |
+|---|---|---|---|
+| GET | `/api/content/features/` | open | /project 用 |
+| GET | `/api/content/team/` | open | 公開團隊頁已移除，端點與 CMS 資料保留（含 skill_levels + contributions） |
+| GET | `/api/content/releases/` | open | /download 用 |
+| GET | `/api/content/milestones/` | open | /project timeline 用 |
+
+### 7.6 管理員 API（React /admin 用）
+> 除特別標註外皆 `IsAdminUser`（staff）；清單端點分頁 query 為 `page`（每頁邏輯見 `_paginate`）。
+
+| Method | 端點 | 權限 | request 參數 | 說明 |
+|---|---|---|---|---|
+| GET | `/api/admin/me/` | auth | — | 回 `{is_staff, is_superuser}` 給前端決定是否顯示後台入口 |
+| GET | `/api/admin/overview/` | staff | — | 統計 + 最近活動 |
+| GET | `/api/admin/dashboard/` | staff | — | 14 天 series + provider_breakdown + top_ai_users |
+| GET | `/api/admin/users/` | staff | query：`q?`、`page?` | 使用者列表 |
+| GET | `/api/admin/users/{id}/` | staff | path：`user_id` | 詳情含 wallet + 交易 + ai_usage |
+| POST | `/api/admin/users/{id}/adjust-coin/` | staff | body：`delta`（int，可正負）、`note?`（≤255） | 調 coin（會寫 audit） |
+| GET | `/api/admin/users/{id}/login-events/` | staff | — | 該使用者登入記錄（最近 50 筆；method/ip/ua 白名單） |
+| GET | `/api/admin/users/{id}/subscription/` | staff | — | 該使用者訂閱現況（無則 null） |
+| POST | `/api/admin/users/{id}/subscription/` | staff | body：`action`=`grant`\|`cancel`、grant 另需 `plan_code`、`periods`（1–36） | 開通/延長或取消訂閱（寫 `subscription_adjust` audit） |
+| GET | `/api/admin/subscriptions/plans/` | staff | — | 訂閱方案清單（含停用；唯讀） |
+| GET | `/api/admin/domains/` | staff | query：`q?`、`status?`、`page?` | 全部網域驗證清單 |
+| POST | `/api/admin/domains/{id}/override/` | staff | body：`approve`（bool）、`note?` | 人工核准（視同通過）/否決（寫 `domain_override` audit） |
+| GET | `/api/admin/transactions/` | staff | query：`kind?`、`user_id?`、`page?` | 交易紀錄 |
+| GET | `/api/admin/reviews/` | staff | query：`pending?`、`reported?`、`status=published\|hidden`、`page?` | 評論治理清單與總數/平均/待回覆/待審檢舉統計 |
+| POST / DELETE | `/api/admin/reviews/{id}/reply/` | staff | POST body：`reply`（1–2000） | 新增、更新或移除單一 `ReviewResponse`；不得改原評分 |
+| PATCH | `/api/admin/reviews/{id}/moderate/` | staff | body：`status=published\|hidden` | 隱藏/重新公開並結案待處理檢舉，寫 audit |
+| GET | `/api/admin/scans/` | staff | query：`q?`、`status?`、`page?` | 掃描列表 |
+| GET | `/api/admin/scans/{id}/` | staff | path：`scan_id` | 掃描詳情 |
+| GET | `/api/admin/orders/` | staff | query：`q?`、`status?`、`invoice_type?`、`page?` | 訂單列表 |
+| GET | `/api/admin/audit-log/` | **superuser** | query：`action?`、`actor_id?`、`page?` | 管理員操作審計 |
+| GET / POST / PUT / PATCH / DELETE | `/api/admin/cms/features/` | staff | ViewSet（ProjectFeature 欄位） | ProjectFeature CRUD（W4 新） |
+| GET / POST / PUT / PATCH / DELETE | `/api/admin/cms/team/` | staff | ViewSet（TeamMember 欄位） | TeamMember CRUD（W4 新） |
+| GET / POST / PUT / PATCH / DELETE | `/api/admin/cms/releases/` | staff | ViewSet（AppRelease 欄位） | AppRelease CRUD（W4 新） |
+| GET / POST / PUT / PATCH / DELETE | `/api/admin/cms/plans/` | staff | ViewSet（PricingPlan 欄位） | PricingPlan CRUD（W4 新） |
+| GET | `/api/admin/announcements/active/` | auth | — | 目前有效公告（任何登入者；過期臨時公告自動排除） |
+| GET / POST | `/api/admin/announcements/` | staff | POST body 見下表 | 列表（含停用/過期）/ 建立公告 |
+| GET / PATCH / DELETE | `/api/admin/announcements/{id}/` | staff | path：`pk`；PATCH body 部分欄位 | 取得 / 部分更新 / 刪除單一公告 |
+
+**公告 body 參數（`AnnouncementSerializer`）：**
+
+| 參數 | 型別 | 必填 | 預設 | 說明 |
+|---|---|---|---|---|
+| `title` | string（≤128） | ✅ | — | 標題 |
+| `content` | text | ✅ | — | 內文 |
+| `type` | enum `permanent`/`temporary` | — | `temporary` | 常駐 / 臨時公告 |
+| `active_days` | int | — | `7` | 臨時公告從建立日起顯示天數（常駐忽略） |
+| `is_active` | bool | — | `true` | 是否啟用 |
+
+### 7.7 評論互動補充
+| Method | 端點 | 權限 | 說明 |
+|---|---|---|---|
+| POST | `/api/reviews/{id}/helpful/` | auth | 切換評論「有幫助」 |
+| POST | `/api/reviews/{id}/report/` | auth | 檢舉他人評論；每位使用者每則評論保留一筆 |
+| GET | `/api/reviews/?sort=helpful\|newest&rating=1..5` | open | 依 helpful/最新排序並可篩星等 |
+
+### 7.8 免費分析工具（insights app，公開、不扣 coin）
+| Method | 端點 | 權限 | request 參數 | 說明 |
+|---|---|---|---|---|
+| POST | `/api/insights/speed-test/` | open | body：`url`（≤2048）、`authorization_confirmed`（bool，須 true） | 單頁輕量測速：TTFB、傳輸量、阻塞 script、快取/壓縮建議；阻擋 localhost/內網/保留 IP 防 SSRF |
+| POST | `/api/insights/phishing-url/` | open | body：`url`（≤2048） | 可疑連結風險判斷（本機特徵分類器） |
+| POST | `/api/insights/phishing-email/` | open | body：`raw_email`（≤200000） | 郵件原始碼釣魚風險判斷（本機特徵分類器） |
+
+---
+
+## 8. 資料模型概要（ER 摘要）
+
+```
+User (accounts.User，繼承 AbstractUser，沒加欄位)
+ ├── coin_wallet → CoinWallet (OneToOne)
+ │    └── transactions → CoinTransaction[]（審計不可改）
+ ├── purchase_orders → PurchaseOrder[]
+ ├── platform_review → PlatformReview (OneToOne；完成掃描才可建立)
+ │    ├── official_response → ReviewResponse (OneToOne)
+ │    ├── revisions → ReviewRevision[]
+ │    ├── reports → ReviewReport[]
+ │    └── helpful_marks → ReviewHelpful[]
+ ├── scan_jobs → ScanJob[]
+ │    ├── pages → Page[] (UniqueConstraint scan_job+url)
+ │    │    └── findings → Finding[]（含 bounding_box）
+ │    ├── findings → Finding[]
+ │    ├── agent_sessions → AgentSession[]
+ │    │    └── steps → AgentStep[]
+ │    ├── authorization_consent → AuthorizationConsent (OneToOne)
+ │    └── coin_transactions → CoinTransaction[]（透過 scan_job FK）
+ ├── verified_domains → VerifiedDomain[]（網域所有權驗證；unique(user,domain)）
+ ├── login_events → LoginEvent[]（登入記錄：method/ip/user_agent）
+ ├── subscription → UserSubscription (OneToOne；輕量訂閱)
+ ├── admin_audit_logs → AdminAuditLog[] (as actor)
+ ├── admin_audit_logs_received → AdminAuditLog[] (as target)
+
+PricingPlan（4 個 seed：starter/standard/advanced/flagship）
+SubscriptionPlan（3 個 seed：sub-lite 199/300、sub-pro 499/900、sub-team 999/2000）
+ProjectFeature / TeamMember / AppRelease / ProjectMilestone（CMS，公開頁用）
+Announcement（公告：type=permanent/temporary、active_days、is_active）
+ReviewMessage / ReviewMessageHelpful（只為舊資料與 migration 相容保留，不再有公開端點）
+```
+
+### 重要欄位速查
+- `CoinWallet`: balance / total_purchased_ntd / total_scans_used / last_bonus_year+month
+- `CoinTransaction`: 欄位 `kind`（monthly_bonus / purchase / scan_hold / scan_refund / admin_adjust / rebuild_hold / rebuild_refund / fixgen_grant / fixgen_charge / fixgen_refund / subscription_grant）、`amount`、`balance_after`、`scan_job`/`plan`/`admin_actor` FK（皆 nullable）、`note`（審計不可改）
+- `PurchaseOrder.status`: pending → paid / cancelled；含 price_ntd/coin_amount 快照、`invoice_type`(personal/company)、`carrier_type`(cloud/mobile_barcode/citizen_digital)、`carrier_id`
+- `UserSubscription`: user OneToOne、status（active/cancelled/expired）、periods_remaining、current_period_end、last_grant_period（"YYYY-MM" 冪等）、source（admin_grant/ecpay_test）；結算走 `billing.services.settle_subscription`（惰性觸發：登入/查錢包/查訂閱）
+- `VerifiedDomain`: status（pending/verified/rejected/expired）、method（dns_txt/meta_tag/html_file/gsc）、token、expires_at（90 天 TTL，`ARGUS_DOMAIN_VERIFICATION_TTL_DAYS`）、admin_override；GSC 僅 `siteOwner` 且 property 涵蓋專案 hostname 時可驗證；`is_effectively_verified`＝override 或 verified 未過期；**active 掃描閘門以此判定（子網域涵蓋）**
+- `LoginEvent`: method（password/google/register）、ip_address、user_agent、created_at；寫入包 try/except 不影響登入
+- `ScanJob.status`: queued / crawling / scanning / agent_testing / completed / failed / cancelled
+- `ScanJob.progress`（JSON）: `{pages_done, pages_total, phase, phase_started_at}`
+- `Finding`: severity (critical/high/medium/low/info)、category (seo/aeo/geo/security/ux)、bounding_box、ai_handoff_prompt、rule_id（如 `waf_block_detected`＝WAF 阻擋偵測）
+- `PlatformReview`: user OneToOne、rating（1-5）、title、comment、show_partial_email、status（published/hidden）、experience_at；`display_name` 與 `is_featured` 僅保留舊資料相容，公開作者只會顯示匿名標籤或後端產生的遮罩 Email
+- `ReviewResponse`: review OneToOne、author、body；`ReviewRevision` 保存本人編修前版本；`ReviewReport` 保存檢舉與 pending/resolved/dismissed
+- `AdminAuditLog`: 欄位 `admin_actor`、`target_user`、`action`（coin_adjust / review_reply / review_moderate / review_delete / user_toggle_staff / subscription_adjust / domain_override / other）、`target_object_repr`、`payload`（JSON，非 `detail`）
+
+---
+
+## 9. 行為準則（**寫 code 前必讀**，沿用 CLAUDE.md 摘要；完整版見 `docs/behavior-guidelines.md`）
+
+1. **動手前先思考**：不要假設。列假設、列取捨、有疑慮先問。
+2. **簡潔優先**：用最少的程式碼解決問題。不寫推測性內容、不加未要求的彈性。
+3. **精準修改**：只動必須動的地方；不順便改相鄰程式碼；配合現有風格。
+4. **深度理解優先**：寫前讀現有檔案、確認真正需求；寫後**更新交接檔**（`.sisyphus/argus-handoff.local.md`）與相關 `.md`。
+5. **目標導向**：先寫測試/驗證條件，再寫實作。多步驟先列計畫。
+6. **每次更新後必須徹底檢查**：直到 `manage.py test` 與 `ruff` 全綠、前端 build（`frontend/build-node22.ps1`）通過才算完成。
+
+**程式規範**
+- 所有回覆與程式碼註釋一律**繁體中文**
+- API Key / Token / 密碼一律放 `.env`，**絕不**硬編碼
+- Python 套件用 `uv add`、`uv run`，**禁止**污染全域
+- Playwright 瀏覽器必須在 `.ms-playwright`：`$env:PLAYWRIGHT_BROWSERS_PATH=".ms-playwright"; uv run playwright install chromium`
+- 不在程式碼/日誌/對話中洩漏使用者個資
+
+---
+
+## 10. 已完成（截至本檔生效時）
+
+從 `開發計畫.md` 摘要：T1–T26 + W1–W4 + 同學貢獻已完成，包含：
+
+| 階段 | 內容 |
+|---|---|
+| T1–T10 | MVP 後端 + 前端 + Word 報告 + 後台 |
+| T11–T12 | 法律授權 + 測試由 27 擴增至數百項 |
+| T13–T15 | Hermes-Agent / 主動式資安 / 拓撲圖 |
+| T16–T18 | Coin 點數制 + 評論 + Jazzmin 美化（後 W4 砍掉） |
+| T19–T21 | React /admin / 3 步驟結帳 wizard / AI 用量 dashboard |
+| T22–T26 | 公開頁 CMS / PWA / Audit log + 兩級權限 / Reviews 舊版 thread（後續已升級為已驗證評論治理） |
+| **W1** | TopNav 加下載 + /scans 範圍切換（單頁/整站）+ /billing 電子發票載具（手機條碼/自然人憑證） |
+| **W4** | 砍 django-jazzmin + React /admin 補 inline CRUD（content + plans） |
+| **W3** | /reviews 重做為 Trustpilot 風（點讚/精選/lightbox/admin 真名） |
+| **W2** | /team /purchase /project 視覺大美化 + 字體全面放大（評審老花需求） |
+
+**最新 commit**: 持續更新中（看 `git log --oneline -5`）
+
+**驗證狀態**：後端數百項測試（以 `manage.py test apps` 實跑為準）、ruff、frontend build 均納入 CI quality gate。
+
+### 同學（另一個 Claude Code）已完成
+
+- `後台深色 sidebar 改造 + Node 24 build crash 修復`（f38c6d8）
+- `文件：建立多層 CLAUDE.md + log 規範 + 禁止事項清單`（6206b3e）
+- `修復：掃描詳情頁雙重載入動畫`（6f1b9da）
+
+**重要規範**（建立於 `frontend/CLAUDE.md`）：
+- **build 必須用 `frontend/build-node22.ps1`**（系統 Node v24 + Rollup 4 在 Windows crash），dev 兩種 Node 都能跑
+- 禁止 inline style（除動態值如 progress 寬度）
+- 頁面依 domain 放 `features/`，共用 UI / hook 放 `components/` 或 `shared/`；`App.jsx` 只管根路由與 lazy loading
+- 禁止 `fetch()` / `axios` 直接呼叫（要走 `api.js`）
+- 套件安裝使用 portable Node 22 的 npm；實際候選路徑以 `docs/node22-guide.md` 為準
+
+---
+
+## 11. 你可以從這裡接手（**先挑一個告訴對方再動手**）
+
+依複雜度排列，挑一個跟另一個 Claude Code 同步是哪個再開工：
+
+### 簡單（< 半天）
+1. **PublicNav 加 hamburger menu**（mobile 響應式）— `frontend/src/features/public/PublicPages.jsx::PublicNav` + `styles/21-public.css`
+2. **/download 加版本檢查**（SW 更新時提示 reload）— `frontend/public/service-worker.js` + `main.jsx`
+3. **（已完成）DEV LOGIN 後門清理** — dev-login 後門已移除，並有測試斷言其回 404；此項保留為歷史紀錄
+4. **TeamPage 加成員照片支援**（TeamMember 加 ImageField avatar）— `apps/content/models.py` + migration + admin + 前端 fallback
+
+### 中等（半天 ~ 1 天）
+5. **AdminAuditLog 擴充**：訂單狀態變更、user toggle staff 也寫 log
+6. **前台 DashboardPage 加「我的 AI 用量」段**（目前只有 admin 看得到）
+7. **（已完成）評論治理狀態改 DB annotation**，待回覆與檢舉列表不產生 N+1
+8. **iOS Safari PWA 實機測試**（修補可能的 manifest 問題）
+9. **（已完成）/reviews 星等篩選、helpful/newest 排序與已驗證體驗限制**
+10. **/billing 載具表單** 改即時格式提示（輸入時 highlight 不合格字元）
+
+### 較大（1+ 天）
+11. **（已完成測試環境）綠界金流**—— 建立 payment-stage 訂單 + CheckMacValue callback + 冪等入點；正式商店不在本專題範圍
+12. **Playwright E2E 測試** —— 覆蓋掃描流程、報告互動、終止按鈕、結帳 wizard
+13. **拓撲圖 v2**：加 force layout、互動拖曳保存、節點群組
+14. **AI 用量 quota / 上限警告**（超過 100k tokens/月）
+15. **/admin/content 加 drag 排序**（目前用 sort_order 輸入，UX 不夠直覺）
+16. **公開頁 SEO**：加 sitemap.xml、Open Graph meta、JSON-LD 結構化資料
+
+---
+
+## 12. 兩位 Claude Code 協作守則
+
+我們現在都在 **main branch** 直接 push（看歷史 commit 風格）。為了避免衝突：
+
+### 12.1 每次動手前
+```powershell
+git fetch origin
+git log --oneline --left-right HEAD...origin/main   # 比對差異，不要無腦 pull
+```
+確認遠端不會覆蓋本機規則後再整合；若有 unstaged 改動先 stash 或 commit。詳見 `CLAUDE.local.md`「git pull 保護本機規則」。
+
+### 12.2 分工溝通
+- 用聊天明確告訴對方「我要改 X、預計動 Y 檔」
+- 不要兩人同時改同一個 `features/<domain>/` 檔；不同 domain 可平行開發
+- 後端改不同 app 較安全；前端改不同 feature 較安全
+- 改 `settings.py` / `urls.py` / `App.jsx` / `shared/AppShared.jsx` 等共用檔前先講
+
+### 12.3 Commit 規範
+- 標題用**繁體中文**，1 句話描述「做了什麼」
+- 多項改動 body 用 bullet 列重點
+- 結尾加 Co-Authored-By（如 GitHub 顯示）
+- 不 amend、不 force push、不 skip hooks
+- 範例：
+  ```
+  Reviews 圖片支援 lightbox 預

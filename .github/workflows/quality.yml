@@ -1,0 +1,108 @@
+name: Quality Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SECRET_KEY: ci-only-django-secret-key-at-least-32-bytes
+      JWT_SECRET_KEY: ci-only-jwt-secret-key-at-least-32-bytes
+      PASSWORD_RESET_TOKEN_PEPPER: ci-only-independent-reset-token-pepper
+      DJANGO_DEBUG: "true"
+      KALI_TEST_REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.17"
+      - name: 同步鎖定依賴
+        run: uv sync --frozen
+      - name: 安裝報告圖表所需的 CJK 字型
+        # 報告測試會實際產生 .docx（含 matplotlib 圖表），缺字型會在畫圖時
+        # RuntimeError。與 Dockerfile 裝的是同一個套件。
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+      - name: Ruff
+        run: uv run ruff check backend
+      - name: Django 設定與 migration 漂移
+        run: |
+          uv run python backend/manage.py check
+          uv run python backend/manage.py makemigrations --check --dry-run
+      - name: 部署契約
+        run: uv run python -m unittest discover -s tests
+      - name: 後端完整測試
+        run: uv run python backend/manage.py test apps
+      - name: Kali runner digest 推廣一致性
+        run: uv run python scripts/promote_kali_image.py --check
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安裝鎖定依賴
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      # .jsx 不經型別檢查：引用不存在的名稱時 build 照樣成功、要到瀏覽器才炸，
+      # 這類錯誤只有 lint 抓得到（2026-09-26 在 /free-tools 抓到一例）
+      - name: ESLint
+        working-directory: frontend
+        run: npm run lint
+      - name: TypeScript 型別檢查
+        working-directory: frontend
+        run: npm run typecheck
+      - name: 前端測試
+        working-directory: frontend
+        run: npm test
+      - name: Production build
+        working-directory: frontend
+        run: npm run build
+
+  repository-text:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 追蹤文字檔 UTF-8 與 GitOps 排隊契約
+        # 斷言內容在腳本裡，build-backend.yml 跑的是同一支——避免兩邊各自
+        # 演化、其中一邊悄悄變寬鬆而沒有任何東西會告訴我們。
+        run: python3 scripts/verify_repository_text.py
+
+  kubernetes-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: v1.32.2
+      - name: Kali runner digest 推廣一致性
+        run: python3 scripts/promote_kali_image.py --check
+      - name: Render Kustomize manifests 並斷言網路與 admission 契約
+        run: ./scripts/verify_rendered_manifests.sh
+
+  runner-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: kali-runner 單元測試（純 Python，不需 Docker）
+        run: python -m unittest discover -s kali-runner/tests

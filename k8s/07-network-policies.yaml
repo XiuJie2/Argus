@@ -1,0 +1,344 @@
+# Argus namespace 網路邊界。
+# NetworkPolicy 只有在 CNI 支援並啟用 enforcement 時才會生效；部署後必須依 README 做封包驗證。
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-ingress-from-frontend
+  namespace: argus
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress-from-backend
+  namespace: argus
+spec:
+  podSelector:
+    matchLabels:
+      app: db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [web, worker, migrate]
+      ports:
+        - protocol: TCP
+          port: 5432
+    - from:
+        - ipBlock:
+            cidr: 172.16.2.0/24
+        - ipBlock:
+            cidr: 172.20.2.0/24
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-ingress-from-backend
+  namespace: argus
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [web, worker]
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-egress-boundary
+  namespace: argus
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: web
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: migrate-egress-boundary
+  namespace: argus
+spec:
+  podSelector:
+    matchLabels:
+      app: migrate
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: application-egress-boundary
+  namespace: argus
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [web, worker]
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.0.2.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 198.51.100.0/24
+              - 203.0.113.0/24
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 587
+    # IPv6 公網 egress：只允許 global unicast 2000::/3，並排除 IETF
+    # special-purpose、documentation 與 6to4。使用同位址族的 CIDR，避免 API Server 將
+    # IPv4-mapped prefix 正規化成 IPv4 後判定不是 IPv6 cidr 的 strict subset。
+    # CNI 必須支援 IPv6 NetworkPolicy 才生效。
+    - to:
+        - ipBlock:
+            cidr: 2000::/3
+            except:
+              - 2001::/23
+              - 2001:db8::/32
+              - 2002::/16
+              - 3fff::/20
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 587
+    # Task 7：worker 對 Kubernetes API 的 egress（管理 argus-kali Job）。
+    # 只允許 Service clusterIP 與 endpoint 兩個 /32：不得擴大成 private CIDR，
+    # 避免 worker 被拿來探測內網。
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 172.16.2.122/32
+      ports:
+        - protocol: TCP
+          port: 6443
+    # OpenCode agent server（叢集外主機 172.16.2.126:4096）。
+    # 只開單一 /32 與單一 port：公網 egress 那條規則 except 掉了 172.16.0.0/12，
+    # 沒有這條 worker 連不上，而且症狀是靜默 timeout、不是明確錯誤。
+    # 不得改成整段 172.16.0.0/12——那等於把 worker 變成內網掃描跳板。
+    - to:
+        - ipBlock:
+            cidr: 172.16.2.126/32
+      ports:
+        - protocol: TCP
+          port: 4096
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-deny-egress
+  namespace: argus
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [db, redis]
+  policyTypes:
+    - Egress
+  egress: []
+---
+# Task 7：argus-kali namespace 預設全拒（Ingress + Egress）。
+# 沒有這條，runner pod 會被 default allow；下面的 argus-kali-runner-egress
+# 才放行 DNS + 公網 80/443。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argus-kali-default-deny
+  namespace: argus-kali
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+---
+# Task 7：runner（label app=kali-sqlmap，見 Task 4 build_restricted_runner_pod）
+# 只能對外：CoreDNS（UDP/TCP 53）+ IPv4/IPv6 公網（TCP 80/443）。
+# 不開 587（runner 不寄信）、不開 private CIDR（避免 SSRF 內網）。
+# CNI 必須支援 IPv6 NetworkPolicy，IPv6 rule 才生效。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argus-kali-runner-egress
+  namespace: argus-kali
+spec:
+  podSelector:
+    matchLabels:
+      app: kali-sqlmap
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.0.2.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 198.51.100.0/24
+              - 203.0.113.0/24
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 2000::/3
+            except:
+              - 2001::/23
+              - 2001:db8::/32
+              - 2002::/16
+              - 3fff::/20
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443

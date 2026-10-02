@@ -1,0 +1,224 @@
+# Argus k8s 部署
+
+把 Argus 從 Docker Compose 搬到 PVE k8s（1 master + 2 worker）的 manifest。
+image 由 GitHub Actions build 後推到 Docker Hub：`shijie85/argus-backend`、`shijie85/argus-frontend`。
+
+> backend image 以 `uv sync --frozen --no-dev` 建立 `/app/.venv`。正式 Pod 必須使用 `/app/.venv/bin/python`、`/app/.venv/bin/gunicorn`、`/app/.venv/bin/celery` 的絕對路徑，不可依賴 image 是否已把 `.venv/bin` 加入 `PATH`；也不要改用 `uv run`，否則 uv 會在 runtime 嘗試解析與下載 dev dependency。
+>
+> web 的 HTTP readiness / liveness probe 固定送出 `Host: localhost`。Kubernetes 預設使用 Pod IP 作為 Host header，但正式環境的 `DJANGO_ALLOWED_HOSTS` 不應放寬到動態 Pod IP；`localhost` 已在允許清單內，可讓 probe 通過並保留 Host header 防護。
+
+## GitOps 實際流程與狀態判讀
+
+1. push 到 `main` 後，Quality Gate 會檢查 backend、frontend（ESLint、TypeScript 型別、Vitest、build）、追蹤文字檔與 Kustomize manifests。前端 image build 前會重跑同一組前端檢查（由 `tests/test_ci_quality_gate_parity.py` 鎖定不得弱於 Quality Gate）。
+2. 改到 `backend/**`、`Dockerfile`、`pyproject.toml`、`uv.lock` 等 backend image 相依檔時，Backend Image workflow 才會 build / push image；`frontend/**` 由另一個 workflow 處理。只有 `k8s/**` 的變更不會建新 image。
+3. image 成功推送後，workflow 才會用 `kustomize edit set image` 更新 `k8s/kustomization.yaml`，並由 `github-actions[bot]` 把 image tag commit 回 `main`。Build 失敗時不會有 write-back commit。
+4. Argo CD 偵測 Git revision 後，是否自動套用取決於 Application 當下的 Auto Sync 設定；不可只看到 Git push 成功就宣稱部署完成。
+5. backend Sync 會先執行 `migrate` PreSync Job，再 rollout web / worker。Argo UI 的容器 `Terminated` 只表示程序已結束：必須檢查 reason、exit code 與 logs，`Completed / 0` 才是成功。
+6. cloudflared ingress / DNS 是 GitOps 之外的服務層；Git push、image build 或 Argo Sync 都不會自動修改 cloudflared 設定，操作方式見 [`../docs/cloudflared-guide.md`](../docs/cloudflared-guide.md)。
+
+除錯時依序保留各層證據：source commit → Quality Gate → image build → write-back commit → Argo Sync / Health → migrate logs → Pod Ready / restart count → 公開 GET / API。任何一層失敗，都不可用前一層的成功取代。
+
+## 檔案
+
+| 檔案 | 內容 |
+|---|---|
+| `01-namespace-config.yaml` | `argus` namespace + 非機密環境變數 ConfigMap |
+| `02-secret.example.yaml` | 機密**範本**（複製成 `secret.yaml` 填真值，勿 commit） |
+| `03-data.yaml` | PostgreSQL（StatefulSet）、Redis、共享 `media` PVC（RWX/NFS） |
+| `04-backend.yaml` | migrate Job + `web`（Gunicorn ×2）+ `worker`（Celery ×2） + 四支維護 CronJob：`reap-stale-scans`（每 15 分，回收被 SIGKILL 中斷的掃描並退點數）、`cleanup-reports`（每日 20:00 UTC，保留 180 天）、`cleanup-screenshots`（20:30 UTC，保留 90 天）、`cleanup-rebuilds`（21:00 UTC，保留 30 天）。三支 cleanup **必須掛 media PVC**，沒掛就是在空目錄裡掃、每天回報「刪除 0 個」 |
+| `05-frontend.yaml` | nginx 前端（ConfigMap 覆蓋 nginx.conf）×2 + ClusterIP |
+| `06-gateway.yaml` | Gateway API 對外入口（NGINX Gateway Fabric，class `nginx`） |
+| `07-network-policies.yaml` | web/data ingress 白名單與 frontend/migrate/application/data egress 邊界（含 IPv4+IPv6 公網 allow / 私網 deny、worker 對 API server 的精確 /32 egress、`argus-kali` namespace 預設全拒 + runner 專屬 DNS+公網 80/443 邊界） |
+| `09-ngf-client-settings.yaml` | NGF `ClientSettingsPolicy`：對齊 frontend nginx 的 `client_max_body_size 6m`，避免 NGF 資料平面回 413 |
+| `10-kali-runtime.yaml` | `argus-kali` 受限 runtime namespace（PSA restricted:v1.35）、worker orchestrator SA + tokenless runner SA、least-privilege Role/RoleBinding、單 runner ResourceQuota + LimitRange |
+| `11-kali-admission.yaml` | cluster-scoped `ValidatingAdmissionPolicy`（CEL，`failurePolicy: Fail`）：13 條契約比對 Job 形狀、image、securityContext、resources、volumes；namespaceSelector 綁 `argus.io/kali-runner=true` |
+
+## 前置（已就緒）
+
+- **StorageClass**：已裝 NFS provisioner，`nfs-client` 為 default 且支援 **RWX**（`kubectl get sc` 確認）。`media` PVC 走 RWX → web/worker 可跨節點共用截圖；postgres PVC 走 nfs-client（RWO 單寫）。
+  - ⚠ **postgres 跑在 NFS 有風險**：NFS 的 root_squash / 檔案鎖可能讓 initdb 失敗（權限）或運行不穩。若 `db-0` pod CrashLoop 報 `permission denied` / `could not create lock file`，把 postgres 的 PVC 改指向 block 儲存（local-path / Ceph RBD）——只有 `media` 需要 NFS 的 RWX，DB 不需要。
+- **Gateway 控制器**：已裝 NGINX Gateway Fabric（GatewayClass `nginx`）。
+
+## 部署步驟
+
+```bash
+# 1. namespace + 設定
+kubectl apply -f 01-namespace-config.yaml
+
+# 2. 機密：複製範本 → 填真值 → apply（secret.yaml 已被 .gitignore 排除）
+cp 02-secret.example.yaml secret.yaml
+#   至少改 POSTGRES_PASSWORD（兩處一致）、DJANGO_SECRET_KEY、JWT_SECRET_KEY、PASSWORD_RESET_TOKEN_PEPPER
+kubectl apply -f secret.yaml
+#   （或從既有 .env 建：kubectl -n argus create secret generic argus-secret --from-env-file=../.env）
+
+# 3. 資料層，等 db ready
+kubectl apply -f 03-data.yaml
+kubectl -n argus rollout status statefulset/db
+
+# 4. 後端：migrate Job 先跑，web/worker 用 initContainer 等 migrate 完成才起
+kubectl apply -f 04-backend.yaml
+kubectl -n argus wait --for=condition=complete job/migrate --timeout=300s
+kubectl -n argus rollout status deploy/web
+kubectl -n argus rollout status deploy/worker
+
+# 5. 前端
+kubectl apply -f 05-frontend.yaml
+kubectl -n argus rollout status deploy/frontend
+
+# 6. Gateway 對外入口
+kubectl apply -f 06-gateway.yaml
+
+# 7. 網路邊界（先確認下方 CoreDNS label 與 CNI enforcement）
+kubectl apply -f 07-network-policies.yaml
+
+# 8. NGF ClientSettingsPolicy（對齊 frontend nginx 的 client_max_body_size 6m）
+kubectl apply -f 09-ngf-client-settings.yaml
+
+# 檢查
+kubectl -n argus get pods,svc,pvc
+kubectl -n argus get gateway,httproute
+kubectl -n argus get networkpolicy
+kubectl -n argus get clientsettingspolicies.gateway.nginx.org
+```
+
+> ⚠ **不要用 `kubectl apply -f .` 套整個目錄**——那會把 `02-secret.example.yaml` 的佔位值一起套進去，蓋掉你真正的 `secret.yaml`。請照上面逐檔套用（web/worker 的 initContainer 會自動等 migrate Job 完成，套用順序不怕錯）。
+
+## 綠界 Stage 啟用與回滾
+
+`origin/main` 已包含建立訂單、Stage 結帳表單、ReturnURL 驗章及冪等入點流程。GitOps 啟用前必須先把 `ECPAY_MERCHANT_ID`、`ECPAY_HASH_KEY`、`ECPAY_HASH_IV` 寫入 live `argus-secret`；不得把值寫進本 repo、命令輸出或 log。`01-namespace-config.yaml` 固定使用公開 Stage 端點與正式公開 HTTPS callback，不支援正式金流模式。
+
+啟用順序：
+
+1. 先更新 live `argus-secret`，只用布林方式確認三個鍵存在且非空。
+2. 再讓 Argo CD 同步本次 ConfigMap；`04-backend.yaml` 的 config revision annotation 會觸發 web／worker rollout，避免 Pod 繼續使用舊環境變數。
+3. 確認 PreSync migrate 為 `Completed / 0`、web／worker Pod Ready，且 `GET /api/billing/plans/` 回傳 `payment_mode=ecpay_test`、`purchase_enabled=true`。
+4. 從購點頁完成一筆 Stage 測試交易，確認 ReturnURL 後訂單從 pending 變 paid，重送相同通知不會重複入點。
+
+若 rollout 或付款驗證失敗，將 `ARGUS_PAYMENT_MODE` 改回 `disabled`，同步 ConfigMap 並再次更新 config revision annotation；確認購點 API 回到 503、既有 web／worker Pod Ready。切勿刪除訂單、`CoinTransaction` 或 `AdminAuditLog` 當作回滾。
+
+## 對外存取（Gateway API）
+
+```bash
+kubectl -n argus get gateway argus-gateway     # 看 ADDRESS 與 PROGRAMMED=True
+# NGINX Gateway Fabric 會為此 Gateway 佈署一個 nginx 資料平面 Service，查它的對外埠：
+kubectl -n argus get svc                       # 找 argus-gateway 相關的 nginx service
+```
+
+- Service 是 **LoadBalancer** 且叢集有 MetalLB → 用配到的 `EXTERNAL-IP`。
+- 沒有 MetalLB（LoadBalancer 卡 `<pending>`）→ 用它的 **NodePort**：`http://<任一節點IP>:<nodeport>`。
+
+⚠ 拿到實際對外位址後，若用 `IP:port` 存取，要把來源補進 `01-namespace-config.yaml`（三個節點 IP 已預填，MetalLB VIP 或其他 IP 需自行加）：
+- `DJANGO_ALLOWED_HOSTS`：加該 IP
+- `CSRF_TRUSTED_ORIGINS` / `CORS_ALLOWED_ORIGINS`：加 `http://<IP>:<port>`
+- `TRUSTED_PROXY_CIDRS`：必須改成叢集實際 Pod CIDR；目前 `10.0.0.0/8` 僅涵蓋常見 10.x 配置。web ingress NetworkPolicy 只允許 frontend pod 連入，代理仍必須覆寫 forwarded headers。
+
+改完 `kubectl apply -f 01-namespace-config.yaml && kubectl -n argus rollout restart deploy/web`。
+
+## NetworkPolicy 部署前檢查與封包驗證
+
+`07-network-policies.yaml` 採最小白名單：
+
+- frontend 只可連 web:8000 與 CoreDNS。
+- migrate 只可連 PostgreSQL:5432 與 CoreDNS。
+- web/worker 只可連 PostgreSQL、Redis、CoreDNS，以及排除內網/保留網段後的公開 IPv4 80/443/587。
+- web/worker 另外允許 IPv6 global unicast `2000::/3` 的 80/443/587，並排除 IETF special-purpose `2001::/23`、兩段 documentation prefix（`2001:db8::/32`、`3fff::/20`）與 6to4；dual-stack 叢集若 CNI 支援 IPv6 NetworkPolicy，掃描目標 IPv6 endpoint 才會通。IPv6 `ipBlock.except` 不可混入 IPv4-mapped prefix，否則 API Server 會以位址族不一致拒絕整份 NetworkPolicy。
+- PostgreSQL/Redis 不得主動 egress，且 ingress 只接受對應的 backend workload。
+
+套用前先確認 CNI 支援 NetworkPolicy，且 CoreDNS 使用目前 selector：
+
+```bash
+kubectl -n kube-system get pods -l k8s-app=kube-dns --show-labels
+kubectl get namespace kube-system --show-labels
+```
+
+若第一個命令找不到 Pod，或叢集使用 NodeLocal DNSCache，先依實際 DNS Pod label／精確 DNS IP 調整 policy；不要改回允許任意目的端的 53 port。
+
+套用後可用受 policy 選取的暫時 worker Pod 驗證。以下「應阻擋」項目應 timeout 或連線失敗；若成功，代表 CNI 未執行 policy 或規則有缺口：
+
+```bash
+kubectl -n argus run egress-policy-check \
+  --image=nicolaka/netshoot --restart=Never --labels=app=worker \
+  --command -- sleep 3600
+kubectl -n argus wait --for=condition=Ready pod/egress-policy-check --timeout=120s
+
+# 應允許：CoreDNS、資料服務、公開 HTTPS
+kubectl -n argus exec egress-policy-check -- nslookup example.com
+kubectl -n argus exec egress-policy-check -- nc -vz -w 3 db 5432
+kubectl -n argus exec egress-policy-check -- nc -vz -w 3 redis 6379
+kubectl -n argus exec egress-policy-check -- curl -I --max-time 5 https://example.com
+
+# 應阻擋：叢集 API、雲端 metadata、任意外部 DNS、節點／私網服務
+kubectl -n argus exec egress-policy-check -- nc -vz -w 3 kubernetes.default.svc 443
+kubectl -n argus exec egress-policy-check -- curl --max-time 3 http://169.254.169.254/
+kubectl -n argus exec egress-policy-check -- dig @8.8.8.8 example.com +time=2 +tries=1
+kubectl -n argus exec egress-policy-check -- nc -vz -w 3 <node-private-ip> 22
+
+kubectl -n argus delete pod egress-policy-check --ignore-not-found
+```
+
+NetworkPolicy 是否真正阻擋封包取決於叢集 CNI；必要時搭配 CNI flow log 或節點側封包紀錄確認「應阻擋」測試沒有送達目的端。若未來使用叢集內 MinIO、私有 SMTP 或 egress proxy，應為該服務新增精準的 namespace/pod selector，不可放寬整段私網。
+
+## K8s Kali SQLmap 攻擊鏈（Task 10 交付，仍 disabled）
+
+Kali SQLmap 主動驗證的 K8s 路徑已實作（Task 1–9）但**預設完全停用**，等 Task 11 控制平面 gate 才會啟用。架構（對應 manifest 與程式碼）：
+
+- **受限 runtime namespace**：`argus-kali` 套用 PSA `restricted:v1.35`，預設全拒 NetworkPolicy，僅放行 runner 的 CoreDNS 53 + 公網 IPv4/IPv6 80/443（不開 587、不放 private CIDR，避免 SSRF 內網）。
+- **RBAC**：worker 用 `argus-worker-kali-orchestrator` SA 跨 ns 操作 Job/Secret/Pod（secrets 僅 `create/delete`，**不** get/list）；runner 用 tokenless `kali-runner` SA，不綁任何 RoleBinding（image 被 RCE 也拿不到叢集 credential）。
+- **單 runner 配額**：`ResourceQuota` 鎖死整個 ns 同一時間最多 1 個 Pod + 1 個 Job，CPU/memory/ephemeral-storage 與 runner 完全一致；LimitRange 補 per-container 上限。
+- **fail-closed admission**：`ValidatingAdmissionPolicy`（CEL，cluster-scoped，binding 用 namespaceSelector 綁 `argus.io/kali-runner=true`）以 13 條契約比對 Job 形狀；`failurePolicy: Fail` + `validationActions: [Deny]`，policy controller 不可達時也拒絕寫入。
+- **Runner image**：pinned `python:3.12.11-slim-bookworm` + SQLmap 1.10 固定 commit；UID/GID 65532 非 root、唯讀 root filesystem、targets Secret 唯讀掛載、`/tmp` 走 1Gi emptyDir。Digest 推廣由 `scripts/promote_kali_image.py` 原子寫入 ConfigMap 與 VAP `approvedImage` 變數。
+- **Disabled sentinel**：目前 ConfigMap 與 VAP 的 image 都是 `…@sha256:0000…`，CEL 連合約內 Job 都會擋下；`ARGUS_KALI_ENABLED=false`、`ARGUS_KALI_BACKEND=disabled`。
+- **Executor**：`backend/apps/scans/security/kali_kubernetes.py` 的 `KubernetesSqlmapExecutor` 以 in-cluster config + Redis 單一 owner global lock + Job-first/Secret-second lifecycle + cancellation-aware watch 達成每 scan 硬上限；raw stdout 永不離開 executor process，stdout 固定為 `""`。
+
+啟用流程、RBAC/Admission/Network 實機檢查、授權 positive test 與 rollback 步驟見
+[`../docs/runbooks/kali-sqlmap-rollout.md`](../docs/runbooks/kali-sqlmap-rollout.md)；
+啟用前必須完成的 Secret 靜態加密見
+[`../docs/runbooks/kubernetes-secret-at-rest-encryption.md`](../docs/runbooks/kubernetes-secret-at-rest-encryption.md)。
+Docker Compose demo（`docker-compose.attack.yml`，本機或隔離 demo 專用）與本啟用鏈無關。
+
+## 更新 image（CI 推了新版後）
+
+```bash
+kubectl -n argus delete job migrate     # Job 不可變，要重跑 migration 先刪再套
+kubectl apply -f 04-backend.yaml
+kubectl -n argus rollout restart deploy/web deploy/worker deploy/frontend
+```
+
+### 獲取資料庫密碼
+```bash
+kubectl get secret argus-secret -n argus -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d; echo
+```
+
+> `04-backend.yaml`／`05-frontend.yaml` 的 base manifest 使用 `:latest`，但 Argo CD 實際套用時由 `kustomization.yaml` 覆寫成 CI 產生的 `sha-xxxxxxx` tag；查正式版本應以 Kustomization 與 live workload 為準。
+
+## 2026-07-14 驗證覆蓋與待驗證功能
+
+以下是本輪 runtime、probe、NetworkPolicy 與 Quality Gate 修復的證據邊界；「已通過結構／單元測試」不代表新 image 已在正式叢集完成端到端驗證。
+
+| 範圍 | 已有證據 | 目前邊界 |
+|---|---|---|
+| Quality Gate | [run 29316906689](https://github.com/Djude1/Argus_WebsiteDiagnosticPlatform/actions/runs/29316906689) 的 backend、frontend、repository-text、kubernetes-manifests 全部成功 | 驗證的是 commit `420a296` 原始碼與 render 結果，不是新 backend image 的正式 rollout |
+| Backend image | 品質閘門內的 Django tests / Ruff / check 成功；本機 Docker contract、`docker buildx build --check` 與修復後完整 image build 均通過；成品內 Gunicorn 23.0.0、Docker CLI 27.3.1、Nuclei 3.8.0、Katana 1.1.2 可啟動 | [run 29316906711](https://github.com/Djude1/Argus_WebsiteDiagnosticPlatform/actions/runs/29316906711) 仍是既有多行 `CMD` 的 parser 失敗紀錄，因此遠端尚無 `sha-420a296` image、沒有 write-back；本地修復仍須 push 後重跑 |
+| Backend runtime / probes | root deployment contracts 驗證 `/app/.venv/bin/...` 與 `Host: localhost`；完整本機 image 的 production Gunicorn CMD 可解析且可執行；目前正式叢集 migrate 完成、web / worker / frontend Ready | 正式叢集仍運行既有 `sha-9f4f868` backend image，須在新 image write-back 後重新確認 migrate、web / worker rollout、restart count 與 probes |
+| NetworkPolicy | Django manifest tests、Kustomize render、API Server server-side dry-run 與先前 Argo Sync 已通過 | 尚未從受 policy 選取的 Pod 執行完整允許／阻擋封包矩陣，公開 IPv6 target 也未做實際連線驗證 |
+| favicon | Django 回歸測試與 Quality Gate 已確認 `/favicon.svg` 可從 tracked `frontend/public/favicon.svg` 讀取 | 尚未在新 backend image 與正式公開路由確認 status、Content-Type、內容與 cache header |
+| Secret 啟動契約 | 正式叢集已補齊必要 key，先前 migrate / web 可啟動；測試環境覆蓋 password reset 邏輯 | 本輪未執行正式寄信、token link、確認頁與重設密碼的端到端流程；不得輸出 Secret 值來驗證 |
+| Kali 主動攻擊鏈（Task 1–9 軟體已完成；Task 10 文件同步） | 後端合約／policy／executor／runner image／AI-first 接線／RBAC／admission／NetworkPolicy／image 推廣／Calico 整合測試**CODE**皆已 merge 並通過單元／合約測試（commit `b87c5ce`..`8810409`） | **正式叢集仍維持 disabled**：`ARGUS_KALI_ENABLED=false`、`ARGUS_KALI_BACKEND=disabled`、runner image 為 disabled sentinel digest；Docker image smoke、kind+Calico 整合 run、`kubectl apply --dry-run=server`、`kubectl auth can-i` RBAC 實機檢查、靜態加密與啟用都是 Task 11 手動控制平面 gate，尚未執行 |
+
+### 可能受影響、但本輪尚未完成正式實機測試
+
+- **完整掃描主流程**：**2026-08-29 已於正式站驗證被動鏈**（scan 26：測試帳號掃自有靶機 `aiglasses.qzz.io`，passive、10 頁——201+queued → coin hold 100 → Celery 立即取件 → Playwright 爬 10 頁 → 逐頁分析 → findings 44 筆 → completed（全程約 2.5 分鐘）→ 依實際頁數結算正確；證據見 `log/2026-08-29_production-scan-smoke-test.md`）。邊界：active／Kali 鏈維持 disabled 未驗證；取消、失敗退款與多 worker 併發路徑本次未觸發。
+- **Celery worker 長時間狀態**：尚未觀察新 image 的 worker liveness、任務重試、取消、失敗回收與多 worker 併發。
+- **實際 CNI egress enforcement**：尚未執行本文件的 CoreDNS、PostgreSQL、Redis、公開 IPv4 / IPv6 allow，以及 Kubernetes API、metadata、外部 DNS、節點私網 deny 矩陣。
+- **密碼重設正式流程**：尚未驗證真實寄信、cloudflared / proxy 產生的 HTTPS link、token pepper 驗證與密碼更新。
+- **新 backend image 的 GitOps 鏈**：尚未確認 Docker Hub push、bot write-back、Argo 新 revision Sync、PreSync migrate 與 web / worker 滾動更新。
+- **Kali 主動攻擊鏈**：Task 1–9 軟體已 merge；K8s 路徑走 `argus-kali` namespace 的受限 Job（見 `10-kali-runtime.yaml` + `11-kali-admission.yaml`），**不再需要** host Docker socket。Docker Compose demo 走獨立 `docker-compose.attack.yml` override，不在正式啟用鏈上。啟用步驟見 [`../docs/runbooks/kali-sqlmap-rollout.md`](../docs/runbooks/kali-sqlmap-rollout.md)（靜態加密前置見 [`../docs/runbooks/kubernetes-secret-at-rest-encryption.md`](../docs/runbooks/kubernetes-secret-at-rest-encryption.md)）；目前仍 disabled，啟用屬 Task 11 手動 gate。
+- **公開入口 smoke test**：**2026-08-29 已驗證**：`argus.clouda.dpdns.org` 與 `xn--gst.tw` 的首頁、`/api/health/live/`、`/api/health/ready/`、`/favicon.svg` GET 皆 200；`argus6.qzz.io` DNS 已無法解析（公共 DNS 查無紀錄，`01-namespace-config.yaml` 的 ALLOWED_HOSTS／CORS／CSRF 仍列有該網域，待團隊確認補 DNS 或移除）。後續新版本上線仍需重跑同組 GET；HEAD 不能取代 GET。
+
+## 尚未處理的待辦
+
+1. **掃描 egress 隔離**：manifest 已限制 CoreDNS、資料服務與公開 IPv4/IPv6 80/443/587，並排除 private、loopback、link-local、metadata 與保留網段。仍必須在實際 CNI 執行上方封包矩陣；Compose/其他平台也需等效 firewall 或受控 proxy。
+2. **Kali 主動攻擊鏈**：軟體已完成（Task 1–9），K8s 路徑以 `argus-kali` namespace 內的受限 Job 取代舊 `docker exec` 鏈，host Docker socket 不再進入正式 worker。`ARGUS_KALI_ENABLED` / `ARGUS_KALI_BACKEND` 仍維持 disabled，啟用屬 Task 11 手動控制平面 gate。核准設計見 [`K8s Kali SQLmap Job 設計規格`](../docs/superpowers/specs/2026-07-14-k8s-kali-sqlmap-job-design.md)；逐步啟用與驗收見 [`../docs/runbooks/kali-sqlmap-rollout.md`](../docs/runbooks/kali-sqlmap-rollout.md)（靜態加密前置為 [`../docs/runbooks/kubernetes-secret-at-rest-encryption.md`](../docs/runbooks/kubernetes-secret-at-rest-encryption.md)）。
+3. **Google service account JSON**：若功能需要，另建 Secret 掛檔並設 `GOOGLE_APPLICATION_CREDENTIALS`，不得放進 image 或 repo。
+4. **TLS / 網域**：Gateway 必須終止 HTTPS、清洗 `X-Forwarded-For/Proto`；frontend 只保留可信 Gateway 傳入的標頭。
+5. **DB 連線數**：Gunicorn 目前每 pod 2 workers × 4 threads，且 `conn_max_age=0`。若出現 `too many clients already`，依實際併發調整 worker/thread 與 PostgreSQL 上限。

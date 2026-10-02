@@ -1,0 +1,300 @@
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import models
+
+
+class CoinWallet(models.Model):
+    """使用者點數錢包（一對一綁定 User）。
+
+    `balance` 為當前可用點數；`total_purchased_ntd` 為累積實際花費新台幣金額；
+    `total_scans_used` 為累積完成的掃描次數；`last_bonus_year/month` 用於每月贈點冪等。
+    """
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="coin_wallet",
+    )
+    # 改用 BigInteger（int64）避免 admin 累加調整或長期使用後超出 int32（≈21億）導致
+    # 「integer out of range」造成登入/月贈點失敗。
+    balance = models.PositiveBigIntegerField(default=0)
+    total_purchased_ntd = models.PositiveBigIntegerField(default=0)
+    total_scans_used = models.PositiveBigIntegerField(default=0)
+    # 月贈點冪等用：記錄最近一次發放的年份與月份，避免同月重複發放
+    last_bonus_year = models.PositiveSmallIntegerField(null=True, blank=True)
+    last_bonus_month = models.PositiveSmallIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["user__username"]
+
+    def __str__(self) -> str:
+        return f"{self.user.username} wallet={self.balance}c"
+
+
+class PricingPlan(models.Model):
+    """購點方案（4 個固定方案）。"""
+
+    code = models.SlugField(max_length=32, unique=True)
+    name = models.CharField(max_length=64)
+    price_ntd = models.PositiveIntegerField()
+    coin_amount = models.PositiveIntegerField()
+    # 用於前端顯示的標籤，例如「最熱門」「-32%」；不影響邏輯
+    badge = models.CharField(max_length=32, blank=True)
+    description = models.CharField(max_length=255, blank=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "price_ntd"]
+
+    def clean(self) -> None:
+        if self.coin_amount < 1:
+            raise ValidationError("coin_amount 必須大於 0")
+        if self.price_ntd < 1:
+            raise ValidationError("price_ntd 必須大於 0")
+
+    def __str__(self) -> str:
+        return f"{self.name} (NT${self.price_ntd}={self.coin_amount}c)"
+
+
+class PurchaseOrder(models.Model):
+    """購點訂單（3 步驟結帳的結果）。
+
+    對應 `PricingPlan` 的一次購買；訂購時的價格與 coin 數做快照存入，避免方案後來改動。
+    `transaction` 連結到實際入帳的 `CoinTransaction`（status=paid 時填）。
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "處理中"
+        PAID = "paid", "已付款"
+        CANCELLED = "cancelled", "已取消"
+
+    class InvoiceType(models.TextChoices):
+        PERSONAL = "personal", "個人發票"
+        COMPANY = "company", "公司發票"
+
+    class CarrierType(models.TextChoices):
+        CLOUD = "cloud", "雲端發票（寄 email）"
+        MOBILE_BARCODE = "mobile_barcode", "手機條碼"
+        CITIZEN_DIGITAL = "citizen_digital", "自然人憑證"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="purchase_orders",
+        db_index=True,
+    )
+    plan = models.ForeignKey(
+        "billing.PricingPlan",
+        on_delete=models.PROTECT,
+        related_name="orders",
+    )
+    # 下單時的價格與 coin 快照（方案後續調整不影響歷史訂單）
+    price_ntd = models.PositiveIntegerField()
+    coin_amount = models.PositiveIntegerField()
+    buyer_name = models.CharField(max_length=64)
+    buyer_email = models.EmailField(max_length=255)
+    invoice_type = models.CharField(
+        max_length=16,
+        choices=InvoiceType.choices,
+        default=InvoiceType.PERSONAL,
+    )
+    company_name = models.CharField(max_length=128, blank=True)
+    tax_id = models.CharField(max_length=16, blank=True)  # 台灣統編 8 碼數字
+    # 個人發票載具（公司發票時忽略）
+    carrier_type = models.CharField(
+        max_length=24,
+        choices=CarrierType.choices,
+        default=CarrierType.CLOUD,
+        blank=True,
+    )
+    carrier_id = models.CharField(max_length=32, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    transaction = models.ForeignKey(
+        "billing.CoinTransaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders",
+    )
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"]),
+            models.Index(fields=["status", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Order #{self.pk} {self.user.username} {self.plan_id} NT${self.price_ntd}"
+
+
+class SubscriptionPlan(models.Model):
+    """訂閱方案（輕量訂閱制：無週期扣款，月繳方案清單供前端顯示）。"""
+
+    code = models.SlugField(max_length=32, unique=True)
+    name = models.CharField(max_length=64)
+    monthly_price_ntd = models.PositiveIntegerField()
+    monthly_coins = models.PositiveIntegerField()
+    # 前端顯示用的特色清單（JSON 陣列，如 ["每月 300 點", "優先掃描"]）
+    features = models.JSONField(default=list, blank=True)
+    badge = models.CharField(max_length=32, blank=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "monthly_price_ntd"]
+
+    def clean(self) -> None:
+        if self.monthly_price_ntd < 1:
+            raise ValidationError("monthly_price_ntd 必須大於 0")
+        if self.monthly_coins < 1:
+            raise ValidationError("monthly_coins 必須大於 0")
+
+    def __str__(self) -> str:
+        return f"{self.name} (NT${self.monthly_price_ntd}/月={self.monthly_coins}c)"
+
+
+class UserSubscription(models.Model):
+    """使用者訂閱（OneToOne；輕量版：無週期扣款，靠 lazy 結算逐月補發）。
+
+    - `periods_remaining`：已付費但尚未贈點的期數（每月 settle 消耗 1）
+    - `current_period_end`：下次贈點時間；全部期數發完後等同名義到期日
+    - `last_grant_period`：最近一次已贈點的期別（如 "2026-09"），冪等用
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "生效中"
+        CANCELLED = "cancelled", "已取消"
+        EXPIRED = "expired", "已到期"
+
+    class Source(models.TextChoices):
+        ADMIN_GRANT = "admin_grant", "管理員授予"
+        ECPAY_TEST = "ecpay_test", "綠界測試付款"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="subscription",
+    )
+    plan = models.ForeignKey(
+        SubscriptionPlan,
+        on_delete=models.PROTECT,
+        related_name="subscriptions",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    periods_remaining = models.PositiveSmallIntegerField(default=1)
+    started_at = models.DateTimeField(auto_now_add=True)
+    current_period_end = models.DateTimeField(help_text="下次贈點時間")
+    last_grant_period = models.CharField(
+        max_length=7,
+        blank=True,
+        help_text='最近一次已贈點期別，如 "2026-09"（同月冪等用）',
+    )
+    source = models.CharField(max_length=16, choices=Source.choices)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.user.username} {self.plan.code} {self.status} 剩 {self.periods_remaining} 期"
+
+
+class CoinTransaction(models.Model):
+    """每一筆 coin 異動的審計紀錄（不可竄改）。
+
+    `amount` 為正負整數（正 = 加點、負 = 扣點）；`balance_after` 是異動後餘額快照，
+    供前後台直接顯示對帳，不用每次重算。
+    """
+
+    class Kind(models.TextChoices):
+        MONTHLY_BONUS = "monthly_bonus", "每月贈點"
+        PURCHASE = "purchase", "購買"
+        SCAN_HOLD = "scan_hold", "掃描預扣"
+        SCAN_REFUND = "scan_refund", "掃描退款"
+        ADMIN_ADJUST = "admin_adjust", "管理員調整"
+        REBUILD_HOLD = "rebuild_hold", "網頁複刻預扣"
+        REBUILD_REFUND = "rebuild_refund", "網頁複刻退款"
+        # 修正產出（Fix Output）：贈與／扣款／退款。額度類交易 amount=0，
+        # 點數類金額非 0——同一 kind 以金額與 note 區分用途。
+        FIXGEN_GRANT = "fixgen_grant", "修正產出額度贈與"
+        FIXGEN_CHARGE = "fixgen_charge", "修正產出扣款"
+        FIXGEN_REFUND = "fixgen_refund", "修正產出退款"
+        SUBSCRIPTION_GRANT = "subscription_grant", "訂閱月贈點"
+
+    wallet = models.ForeignKey(
+        CoinWallet,
+        on_delete=models.CASCADE,
+        related_name="transactions",
+    )
+    amount = models.BigIntegerField()  # 正 = 入帳；負 = 扣款（BigInt 避免單筆大額調整爆 int32）
+    kind = models.CharField(max_length=32, choices=Kind.choices, db_index=True)
+    balance_after = models.PositiveBigIntegerField()  # 與 CoinWallet.balance 同步擴大
+    scan_job = models.ForeignKey(
+        "scans.ScanJob",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="coin_transactions",
+    )
+    plan = models.ForeignKey(
+        PricingPlan,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="transactions",
+    )
+    # 複刻的扣款要能追到是「哪一次產出」，不能只記到 scan_job：一次掃描可以
+    # 產生多次複刻，只記 scan_job 的話退款的冪等判斷會把同一掃描的其他複刻
+    # 一起退掉。
+    site_rebuild = models.ForeignKey(
+        "rebuild.SiteRebuild",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="coin_transactions",
+    )
+    admin_actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="admin_coin_actions",
+    )
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["wallet", "created_at"]),
+            models.Index(fields=["kind", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"{self.wallet.user.username} {self.kind} "
+            f"{self.amount:+d} -> {self.balance_after}"
+        )

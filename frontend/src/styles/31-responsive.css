@@ -1,0 +1,113 @@
+/* ===== Responsive polish：收斂手機版密度與可點擊範圍 ===== */
+
+/* 導覽列（SiteNav／.public-nav）的收合規則在 35-public-legacy.css；會員區、購點、登入頁的
+   響應式規則各自寫在 11／17／19／30 號檔內。 */
+
+@media (max-width: 900px) {
+  .argus-main {
+    padding: 0.875rem;
+  }
+
+  .argus-main.with-nav {
+    padding-top: 0.875rem;
+  }
+
+  /* 後台：側欄收成抽屜，頂部固定品牌列（恆為深色，色值見 18-admin.css 的 --admin-sidebar-*） */
+  .admin-shell {
+    display: block;
+    min-width: 0;
+    padding-top: 56px;
+    background: var(--admin-canvas);
+  }
+
+  .admin-mobile-header {
+    display: flex;
+    position: fixed;
+    inset: 0 0 auto 0;
+    z-index: 45;
+    height: 56px;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0 0.75rem;
+    color: var(--admin-sidebar-text-strong);
+    background: color-mix(in srgb, var(--admin-sidebar-bg) 92%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--admin-sidebar-border);
+  }
+
+  .admin-menu-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--admin-sidebar-border);
+    border-radius: var(--ag-r-md);
+    color: var(--admin-sidebar-text-strong);
+    background: rgba(148, 197, 255, 0.05);
+    cursor: pointer;
+  }
+  .admin-menu-button:focus-visible { outline: 2px solid var(--admin-sidebar-accent); outline-offset: 1px; }
+
+  .admin-drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 47;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: var(--ag-overlay);
+    backdrop-filter: blur(2px);
+  }
+
+  .admin-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 48;
+    width: min(84vw, 288px);
+    height: 100dvh;
+    transform: translateX(-105%);
+    transition: transform var(--ag-dur-3) var(--ag-ease);
+    box-shadow: var(--ag-shadow-3);
+  }
+
+  .admin-sidebar.is-open {
+    transform: translateX(0);
+  }
+
+  .admin-main {
+    width: 100%;
+    min-width: 0;
+    padding: 1rem;
+  }
+
+  .admin-page,
+  .admin-panel,
+  .admin-grid-2col {
+    min-width: 0;
+  }
+
+  .admin-grid-2col {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 表格保留可讀欄寬，只在自己的捲動容器內水平捲動 */
+  .admin-table-scroll .admin-table {
+    min-width: 640px;
+  }
+  .admin-table-scroll .admin-table.compact {
+    min-width: 480px;
+  }
+}
+
+@media (max-width: 640px) {
+  .panel {
+    border-radius: 14px;
+    padding: 1rem;
+  }
+
+  .admin-main {
+    padding: 0.75rem;
+  }
+}

@@ -1,0 +1,117 @@
+# 前端：nginx serve Vite 產物 + 反代 /api 到後端；對外由 Gateway API（06-gateway.yaml）導流
+# 用 ConfigMap 覆蓋 image 內建的 nginx.conf：改靜態 upstream、拿掉 Docker 專用 resolver
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-nginx
+  namespace: argus
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name _;
+      root /usr/share/nginx/html;
+      index index.html;
+      client_max_body_size 6m;
+
+      # k8s 版：Service ClusterIP 穩定，用靜態 upstream，啟動時經 CoreDNS 解析一次即可。
+      # （image 內建版用 resolver 127.0.0.11 是 Docker 專用 DNS，在 k8s 會解析失敗 → 502）
+      location /api/ {
+        proxy_pass http://web:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $http_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_read_timeout 120s;
+      }
+      location /media/ {
+        proxy_pass http://web:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $http_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Content-Security-Policy "default-src 'none'; sandbox" always;
+      }
+      location = /manifest.webmanifest {
+        types { application/manifest+json webmanifest; }
+        default_type application/manifest+json;
+        try_files /manifest.webmanifest =404;
+      }
+      location = /favicon.ico {
+        default_type image/svg+xml;
+        try_files /favicon.svg =404;
+      }
+      location = /favicon.svg {
+        default_type image/svg+xml;
+        try_files /favicon.svg =404;
+      }
+      # Vite hashed 資產缺檔一律 404，不可 fallback 回 index.html：否則滾動更新
+      # 空窗期內對新 chunk 的請求會拿到 200 + HTML，而 Cloudflare 按副檔名快取、
+      # 不看 content-type，就會把 HTML 當成該資產存起來（實測 max-age=14400）。
+      # 與 frontend/nginx.conf 同一條規則，兩邊必須同步修改。
+      location /assets/ {
+        try_files $uri =404;
+      }
+      location / {
+        try_files $uri $uri/ /index.html;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: argus
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+      annotations:
+        # 上面的 frontend-nginx ConfigMap 是以 subPath 掛載的，改了不會同步到既有
+        # pod，也沒有 configMapGenerator 的 name hash 可觸發滾動更新。每次修改
+        # default.conf 都必須把這個數字 +1，否則設定不會生效。
+        argus.io/nginx-conf-revision: "2"
+    spec:
+      containers:
+        - name: frontend
+          image: shijie85/argus-frontend:latest
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: frontend-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: argus
+spec:
+  # ClusterIP：對外改由 Gateway API（06-gateway.yaml）的 HTTPRoute 導流到此 Service
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80

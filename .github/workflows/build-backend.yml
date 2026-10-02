@@ -1,0 +1,125 @@
+# 後端 image（web 與 worker 共用同一個 image，差別只在 k8s 啟動 command）
+# 觸發：push 到 main 且動到後端相關檔案時，自動 build 並推到 Docker Hub
+name: Build & Push Backend Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".dockerignore"
+      - ".github/workflows/build-backend.yml"
+  workflow_dispatch: {} # 允許在 Actions 頁面手動觸發
+
+# 序列化 GitOps write-back：兩個 workflow 共用同一個 group → 同時只有一個在跑，
+# queue:max 會保留排隊中的 runs，避免密集 push 時較早的 pending run 被後來者取代。
+concurrency:
+  group: argus-gitops-cd
+  queue: max
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 讓 GITHUB_TOKEN 能把 kustomization 版本 bump push 回 repo
+    steps:
+      - name: Checkout 原始碼
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # GitOps write-back 需要完整歷史才能 rebase/push
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.17"
+
+      - name: 安裝報告圖表所需的 CJK 字型
+        # 報告測試會實際產生 .docx（含 matplotlib 圖表），缺字型會在畫圖時
+        # RuntimeError。與 Dockerfile 裝的是同一個套件。
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+      # 這一段必須與 Quality Gate 等價。image build 會做 GitOps write-back，
+      # 直接決定正式站跑什麼——閘門若是 Quality Gate 的子集，就會出現
+      # 「Quality Gate 會抓到、但 image 照樣建出來並上線」的缺口。
+      # 先前這裡缺 Kali digest、k8s manifest、repository-text 與 runner 單元測試，
+      # 等於 k8s manifest 壞掉時 image 仍建得出來。
+      - name: 推送 image 前執行後端品質閘門
+        env:
+          DJANGO_SECRET_KEY: ci-only-django-secret-key-at-least-32-bytes
+          JWT_SECRET_KEY: ci-only-jwt-secret-key-at-least-32-bytes
+          PASSWORD_RESET_TOKEN_PEPPER: ci-only-independent-reset-token-pepper
+          DJANGO_DEBUG: "true"
+        run: |
+          uv sync --frozen
+          uv run ruff check backend
+          uv run python backend/manage.py check
+          uv run python backend/manage.py makemigrations --check --dry-run
+          uv run python -m unittest discover -s tests
+          uv run python backend/manage.py test apps
+          uv run python scripts/promote_kali_image.py --check
+
+      - name: 追蹤文字檔 UTF-8 與 GitOps 排隊契約
+        run: python3 scripts/verify_repository_text.py
+
+      - name: kali-runner 單元測試（純 Python，不需 Docker）
+        run: python3 -m unittest discover -s kali-runner/tests
+
+      - uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: v1.32.2
+
+      - name: Render Kustomize manifests 並斷言網路與 admission 契約
+        run: ./scripts/verify_rendered_manifests.sh
+
+      # buildx：啟用 layer cache 與進階 build 功能
+      - name: 設定 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登入 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 依 git 資訊自動產生 tag：latest + sha-<短碼>（供 k8s 精準 pin 版本 / 回滾）
+      - name: 產生 image tag
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ vars.DOCKERHUB_USERNAME }}/argus-backend
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build 並推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          # Dockerfile 內硬編碼下載 linux_amd64 版的 nuclei/katana/docker CLI，
+          # 且 PVE k8s 節點為 x86，故只 build amd64，不做 arm64 多架構。
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 用 GitHub Actions cache 加速重複 build（Playwright base image 很重）
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: GitOps write-back（把新 sha 寫進 k8s/kustomization.yaml）
+        run: |
+          set -e
+          SHA_TAG="sha-${GITHUB_SHA:0:7}"
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" | tar -xz -C /tmp
+          sudo mv /tmp/kustomize /usr/local/bin/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 抓 main 最新狀態 → 只重設自己這個 image 欄位 → push。
+          # concurrency 已保證不會有另一個 write-back 同時跑，故一次到位、不需重試迴圈。
+          git fetch origin main
+          git reset --hard FETCH_HEAD
+          ( cd k8s && kustomize edit set image ${{ vars.DOCKERHUB_USERNAME }}/argus-backend=${{ vars.DOCKERHUB_USERNAME }}/argus-backend:${SHA_TAG} )
+          git diff --quiet k8s/kustomization.yaml && { echo "image tag 未變，略過"; exit 0; }
+          git commit -am "ci(cd): argus-backend -> ${SHA_TAG}"
+          git push origin HEAD:main
